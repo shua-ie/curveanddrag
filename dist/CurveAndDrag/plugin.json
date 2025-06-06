@@ -1,0 +1,32 @@
+{
+  "slug": "CurveAndDrag",
+  "name": "Curve&Drag",
+  "version": "2.8.0",
+  "license": "GPL-3.0-or-later",
+  "brand": "Curve&Drag",
+  "author": "Curve&Drag Team",
+  "authorEmail": "info@curvedrag.com",
+  "authorUrl": "https://github.com/your-username/Curve-and-Drag",
+  "pluginUrl": "https://github.com/your-username/Curve-and-Drag",
+  "manualUrl": "https://github.com/your-username/Curve-and-Drag/blob/main/README.md",
+  "sourceUrl": "https://github.com/your-username/Curve-and-Drag",
+  "donateUrl": "",
+  "changelogUrl": "https://github.com/your-username/Curve-and-Drag/releases",
+  "modules": [
+    {
+      "slug": "CurveAndDrag",
+      "name": "Curve&Drag",
+      "description": "Stereo delay and pitch shifter with MTS-ESP microtonal support, tape-style effects, and comprehensive CV control for creative sound design",
+      "width": 48,
+      "tags": [
+        "Effect",
+        "Delay",
+        "Pitch shifter",
+        "Microtonal",
+        "Stereo",
+        "Tape",
+        "Polyphonic"
+      ]
+    }
+  ]
+}
