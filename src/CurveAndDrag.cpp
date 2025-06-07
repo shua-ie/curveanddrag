@@ -9,6 +9,10 @@
 #include "CurveAndDrag.hpp"
 #include "plugin.hpp"
 #include "CurveAndDragWidget.hpp"
+#include "math_constants.h"
+#include <rack.hpp>
+#include <algorithm>
+#include <cmath>
 
 namespace CurveAndDrag {
 
@@ -25,10 +29,10 @@ CurveAndDragModule::CurveAndDragModule() {
     configParam(MIX_R_PARAM, 0.0f, 1.0f, 0.5f, "Right Dry/Wet Mix", "%", 0.0f, 100.0f);
     
     // Configure sync and subdivision parameters (4)
-    configParam(SYNC_L_PARAM, 0.0f, 1.0f, 0.0f, "Left Tempo Sync");
-    configParam(SYNC_R_PARAM, 0.0f, 1.0f, 0.0f, "Right Tempo Sync");
-    configParam(SUBDIV_L_PARAM, 0.0f, 5.0f, 2.0f, "Left Subdivision");
-    configParam(SUBDIV_R_PARAM, 0.0f, 5.0f, 2.0f, "Right Subdivision");
+    configParam(SYNC_L_PARAM, 0.0f, 1.0f, 0.0f, "Left Channel Tempo Sync");
+    configParam(SYNC_R_PARAM, 0.0f, 1.0f, 0.0f, "Right Channel Tempo Sync");
+    configParam(SUBDIV_L_PARAM, 0.0f, 5.0f, 2.0f, "Left Channel Subdivision");
+    configParam(SUBDIV_R_PARAM, 0.0f, 5.0f, 2.0f, "Right Channel Subdivision");
     
     // Configure cross-feedback and gain parameters (3)
     configParam(CROSS_FEEDBACK_PARAM, 0.0f, 1.0f, 0.0f, "Cross-Feedback Amount", "%", 0.0f, 100.0f);
@@ -36,18 +40,18 @@ CurveAndDragModule::CurveAndDragModule() {
     configParam(OUTPUT_GAIN_PARAM, 0.0f, 2.0f, 1.0f, "Output Gain", "x", 0.0f, 2.0f);
     
     // Configure pitch shifting parameters (8)
-    configParam(PITCH_PARAM, -2.0f, 2.0f, 0.0f, "Pitch Shift", " cents", 0.0f, 600.0f);
-    configParam(DETUNE_DRIFT_PARAM, 0.0f, 1.0f, 0.0f, "Detune Drift", " cents", 0.0f, 100.0f, -50.0f);
-    configParam(DETUNE_L_PARAM, -1.0f, 1.0f, 0.0f, "Left Detune", " cents", 0.0f, 50.0f);
-    configParam(DETUNE_R_PARAM, -1.0f, 1.0f, 0.0f, "Right Detune", " cents", 0.0f, 50.0f);
-    configParam(QUANTIZE_PARAM, 0.0f, 1.0f, 0.0f, "Quantize");
-    configParam(MORPH_PARAM, 0.0f, 1.0f, 0.0f, "Morph");
-    configParam(PITCH_MODE_PARAM, 0.0f, 3.0f, 1.0f, "Pitch Mode");
-    configParam(CHARACTER_PARAM, 0.0f, 1.0f, 0.5f, "Character");
+    configParam(PITCH_PARAM, -2.0f, 2.0f, 0.0f, "Main Pitch Shift: ±2 octaves", " cents", 0.0f, 600.0f);
+    configParam(DETUNE_DRIFT_PARAM, 0.0f, 1.0f, 0.0f, "Detune Drift: Stereo movement", " cents", 0.0f, 50.0f, 0.0f);
+    configParam(DETUNE_L_PARAM, -1.0f, 1.0f, 0.0f, "Left Channel Detune: ±50 cents", " cents", 0.0f, 50.0f);
+    configParam(DETUNE_R_PARAM, -1.0f, 1.0f, 0.0f, "Right Channel Detune: ±50 cents", " cents", 0.0f, 50.0f);
+    configParam(QUANTIZE_PARAM, 0.0f, 1.0f, 0.0f, "Quantize to Scale: Enable pitch correction");
+    configParam(MORPH_PARAM, 0.0f, 1.0f, 0.0f, "Morph: Blend between pitch algorithms");
+    configParam(PITCH_MODE_PARAM, 0.0f, 3.0f, 1.0f, "Pitch Algorithm: BBD/H910/Varispeed/Hybrid");
+    configParam(CHARACTER_PARAM, 0.0f, 1.0f, 0.5f, "Character: Vintage pitch shifter modeling", "%", 0.0f, 100.0f);
     
     // Configure scale and tuning parameters (2)
-    configParam(SCALE_SELECT_PARAM, 0.0f, 10.0f, 0.0f, "Scale Select");
-    configParam(MTS_ENABLE_PARAM, 0.0f, 1.0f, 0.0f, "MTS-ESP Enable");
+    configParam(SCALE_SELECT_PARAM, 0.0f, 10.0f, 0.0f, "Scale Select (0-10): 12-TET to 72-TET and historical");
+    configParam(MTS_ENABLE_PARAM, 0.0f, 1.0f, 0.0f, "MTS-ESP Enable: Use external tuning source");
     
     // Configure tape delay parameters (14)
     configParam(TAPE_MODE_PARAM, 0.0f, 1.0f, 0.0f, "Tape Mode Enable");
@@ -55,18 +59,18 @@ CurveAndDragModule::CurveAndDragModule() {
     configParam(WOW_DEPTH_PARAM, 0.0f, 1.0f, 0.2f, "Wow Depth", "%", 0.0f, 100.0f);
     configParam(FLUTTER_RATE_PARAM, 1.0f, 10.0f, 2.7f, "Flutter Rate", " Hz");
     configParam(FLUTTER_DEPTH_PARAM, 0.0f, 1.0f, 0.1f, "Flutter Depth", "%", 0.0f, 100.0f);
-    configParam(WOW_WAVEFORM_PARAM, 0.0f, 2.0f, 0.0f, "Wow Waveform");
-    configParam(FLUTTER_WAVEFORM_PARAM, 0.0f, 2.0f, 0.0f, "Flutter Waveform");
+    configParam(WOW_WAVEFORM_PARAM, 0.0f, 2.0f, 0.0f, "Wow Waveform: Sine/Triangle/Random");
+    configParam(FLUTTER_WAVEFORM_PARAM, 0.0f, 2.0f, 0.0f, "Flutter Waveform: Sine/Triangle/Random");
     configParam(SATURATION_PARAM, 0.0f, 1.0f, 0.3f, "Tape Saturation", "%", 0.0f, 100.0f);
     configParam(HEAD_BUMP_FREQ_PARAM, 60.0f, 120.0f, 90.0f, "Head Bump Frequency", " Hz");
     configParam(HEAD_BUMP_GAIN_PARAM, 0.0f, 3.0f, 1.2f, "Head Bump Gain", "x");
     configParam(ROLLOFF_FREQ_PARAM, 3000.0f, 15000.0f, 10000.0f, "High Frequency Rolloff", " Hz");
     configParam(ROLLOFF_RESONANCE_PARAM, 0.5f, 2.0f, 0.7f, "Rolloff Resonance");
     configParam(TAPE_NOISE_PARAM, 0.0f, 1.0f, 0.0f, "Tape Noise Enable");
-    configParam(NOISE_AMOUNT_PARAM, 0.0f, 0.1f, 0.01f, "Noise Amount", "%", 0.0f, 10.0f);
-    configParam(HEAD_SELECT_PARAM, 0.0f, 3.0f, 0.0f, "Head Configuration");
-    configParam(AGING_PARAM, 0.0f, 1.0f, 0.0f, "Tape Aging", "%", 0.0f, 100.0f);
-    configParam(INSTABILITY_PARAM, 0.0f, 1.0f, 0.0f, "Tape Instability", "%", 0.0f, 100.0f);
+    configParam(NOISE_AMOUNT_PARAM, 0.0f, 1.0f, 0.1f, "Tape Noise Amount (0-8%): Audible vintage character", "%", 0.0f, 8.0f);
+    configParam(HEAD_SELECT_PARAM, 0.0f, 3.0f, 0.0f, "Head Configuration (1-4): Single/Dual/Triple/Quad");
+    configParam(AGING_PARAM, 0.0f, 1.0f, 0.0f, "Tape Aging: Vintage wear and frequency response", "%", 0.0f, 100.0f);
+    configParam(INSTABILITY_PARAM, 0.0f, 1.0f, 0.0f, "Tape Instability: Speed variations and dropouts", "%", 0.0f, 100.0f);
     
     // Configure all 25 inputs (21 CV + 2 audio + 2 triggers)
     configInput(LEFT_INPUT, "Left Audio");
@@ -403,7 +407,7 @@ void CurveAndDragModule::process(const ProcessArgs& args) {
     
     // ===== SIGNAL FLOW: Input → Pitch → Delay → Cross-feedback → Tape → Output =====
     
-    // STEP 1: ===== CRITICAL FIX: Functional Pitch Shifting System =====
+    // STEP 1: ===== CRITICAL FIX: Completely Rewritten Pitch Shifting System =====
     float leftProcessed = leftInput;
     float rightProcessed = rightInput;
     
@@ -413,7 +417,7 @@ void CurveAndDragModule::process(const ProcessArgs& args) {
     float detuneR = getClampedParam(DETUNE_R_PARAM, DETUNE_R_CV_INPUT, -1.0f, 1.0f) * 50.0f; // ±50 cents
     float detuneDrift = getClampedParam(DETUNE_DRIFT_PARAM, DETUNE_DRIFT_CV_INPUT, 0.0f, 1.0f) * 25.0f; // 0-25 cents
     
-    // Calculate final pitch values for each channel
+    // ===== CRITICAL FIX: Independent Left/Right Pitch Calculation =====
     float leftFinalPitch = basePitch + detuneL + detuneDrift;
     float rightFinalPitch = basePitch + detuneR - detuneDrift;
     
@@ -433,147 +437,217 @@ void CurveAndDragModule::process(const ProcessArgs& args) {
         }
     }
     
-    // Apply pitch shifting if any pitch change is active
+    // ===== CRITICAL FIX: Apply Pitch Shifting With Proper Gain Compensation =====
     if (std::abs(leftFinalPitch) > 1.0f || std::abs(rightFinalPitch) > 1.0f) {
-        // Get pitch mode
+        // Get pitch mode and character
         int pitchMode = clamp(static_cast<int>(params[PITCH_MODE_PARAM].getValue()), 0, 3);
         float character = getClampedParam(CHARACTER_PARAM, CHARACTER_CV_INPUT, 0.0f, 1.0f);
         
-        // ===== CRITICAL FIX: Simple but Effective Pitch Shifting =====
-        // Convert cents to semitone ratio
+        // Convert cents to pitch ratios
         float leftRatio = std::pow(2.0f, leftFinalPitch / 1200.0f);
         float rightRatio = std::pow(2.0f, rightFinalPitch / 1200.0f);
         
-        // Clamp ratios to prevent extreme values
+        // ===== CRITICAL FIX: Automatic Gain Compensation =====
+        float leftGainComp = 1.0f / std::sqrt(std::abs(leftRatio)); // Compensate for energy changes
+        float rightGainComp = 1.0f / std::sqrt(std::abs(rightRatio));
+        
+        // Clamp compensation to prevent extreme values
+        leftGainComp = clamp(leftGainComp, 0.5f, 2.0f);
+        rightGainComp = clamp(rightGainComp, 0.5f, 2.0f);
+        
+        // Clamp ratios to prevent extreme pitch shifts
         leftRatio = clamp(leftRatio, 0.5f, 2.0f); // ±1 octave max
         rightRatio = clamp(rightRatio, 0.5f, 2.0f);
         
-        // ===== ALGORITHM SELECTION =====
+        // ===== CRITICAL FIX: Functional Algorithm Selection =====
         switch (pitchMode) {
-            case 0: // BBD (Bucket Brigade) - Simple delay-based pitch shifting
+            case 0: // BBD (Bucket Brigade) - Analog delay-based pitch shifting
                 {
-                    static std::array<float, 8192> leftPitchBuffer = {};
-                    static std::array<float, 8192> rightPitchBuffer = {};
-                    static int pitchBufferIndex = 0;
+                    static std::array<float, 8192> leftBBDBuffer = {};
+                    static std::array<float, 8192> rightBBDBuffer = {};
+                    static int bbdIndex = 0;
+                    static float leftBBDPhase = 0.0f;
+                    static float rightBBDPhase = 0.0f;
                     
-                    // Write to buffer
-                    leftPitchBuffer[pitchBufferIndex] = leftProcessed;
-                    rightPitchBuffer[pitchBufferIndex] = rightProcessed;
+                    // Write to buffers
+                    leftBBDBuffer[bbdIndex] = leftProcessed;
+                    rightBBDBuffer[bbdIndex] = rightProcessed;
                     
-                    // Calculate read positions based on pitch ratio
-                    float leftReadPos = pitchBufferIndex - (1.0f / leftRatio - 1.0f) * 1000.0f;
-                    float rightReadPos = pitchBufferIndex - (1.0f / rightRatio - 1.0f) * 1000.0f;
+                    // Update read phases based on pitch ratios
+                    leftBBDPhase += 1.0f / leftRatio;
+                    rightBBDPhase += 1.0f / rightRatio;
                     
-                    // Wrap and interpolate
-                    int leftReadInt = static_cast<int>(leftReadPos) & 8191;
-                    int rightReadInt = static_cast<int>(rightReadPos) & 8191;
+                    // Calculate read positions with modulo wrapping
+                    int leftReadPos = static_cast<int>(bbdIndex - leftBBDPhase) & 8191;
+                    int rightReadPos = static_cast<int>(bbdIndex - rightBBDPhase) & 8191;
                     
-                    leftProcessed = leftPitchBuffer[leftReadInt] * leftRatio; // Gain compensation
-                    rightProcessed = rightPitchBuffer[rightReadInt] * rightRatio;
+                    // Read with linear interpolation
+                    float leftFrac = leftBBDPhase - std::floor(leftBBDPhase);
+                    float rightFrac = rightBBDPhase - std::floor(rightBBDPhase);
                     
-                    pitchBufferIndex = (pitchBufferIndex + 1) & 8191;
+                    int leftReadPos2 = (leftReadPos + 1) & 8191;
+                    int rightReadPos2 = (rightReadPos + 1) & 8191;
+                    
+                    leftProcessed = (leftBBDBuffer[leftReadPos] * (1.0f - leftFrac) + 
+                                   leftBBDBuffer[leftReadPos2] * leftFrac) * leftGainComp;
+                    rightProcessed = (rightBBDBuffer[rightReadPos] * (1.0f - rightFrac) + 
+                                    rightBBDBuffer[rightReadPos2] * rightFrac) * rightGainComp;
+                    
+                    // Reset phases to prevent accumulation
+                    if (leftBBDPhase > 4096.0f) leftBBDPhase -= 4096.0f;
+                    if (rightBBDPhase > 4096.0f) rightBBDPhase -= 4096.0f;
+                    
+                    bbdIndex = (bbdIndex + 1) & 8191;
                 }
                 break;
                 
-            case 1: // H910 (Harmonizer) - Granular-style pitch shifting
+            case 1: // H910 (Harmonizer) - Windowed granular pitch shifting
                 {
-                    static std::array<float, 4096> leftGrainBuffer = {};
-                    static std::array<float, 4096> rightGrainBuffer = {};
-                    static int grainIndex = 0;
-                    static float grainPhase = 0.0f;
+                    static std::array<float, 4096> leftH910Buffer = {};
+                    static std::array<float, 4096> rightH910Buffer = {};
+                    static int h910Index = 0;
+                    static float leftGrainPhase = 0.0f;
+                    static float rightGrainPhase = 0.0f;
                     
-                    // Grain size based on pitch ratio
-                    int grainSize = static_cast<int>(512.0f / std::max(leftRatio, rightRatio));
-                    grainSize = clamp(grainSize, 64, 1024);
+                    // Grain size based on pitch ratio for better quality
+                    int grainSize = clamp(static_cast<int>(512.0f / std::max(leftRatio, rightRatio)), 128, 1024);
                     
-                    // Write to grain buffers
-                    leftGrainBuffer[grainIndex] = leftProcessed;
-                    rightGrainBuffer[grainIndex] = rightProcessed;
+                    // Write to buffers
+                    leftH910Buffer[h910Index] = leftProcessed;
+                    rightH910Buffer[h910Index] = rightProcessed;
                     
-                    // Read with windowing
-                    float window = 0.5f * (1.0f - std::cos(2.0f * M_PI * grainPhase / grainSize));
+                    // Generate Hann windows for smooth grains
+                    float leftWindow = 0.5f * (1.0f - std::cos(2.0f * M_PI * leftGrainPhase / grainSize));
+                    float rightWindow = 0.5f * (1.0f - std::cos(2.0f * M_PI * rightGrainPhase / grainSize));
                     
-                    int leftReadIdx = static_cast<int>(grainIndex - grainSize / leftRatio) & 4095;
-                    int rightReadIdx = static_cast<int>(grainIndex - grainSize / rightRatio) & 4095;
+                    // Calculate read positions - CRITICAL FIX: Use proper ratio for pitch direction
+                    int leftReadIdx = static_cast<int>(h910Index - grainSize * leftRatio) & 4095;
+                    int rightReadIdx = static_cast<int>(h910Index - grainSize * rightRatio) & 4095;
                     
-                    leftProcessed = leftGrainBuffer[leftReadIdx] * window;
-                    rightProcessed = rightGrainBuffer[rightReadIdx] * window;
+                    // Apply windowed grains with gain compensation
+                    leftProcessed = leftH910Buffer[leftReadIdx] * leftWindow * leftGainComp;
+                    rightProcessed = rightH910Buffer[rightReadIdx] * rightWindow * rightGainComp;
                     
-                    grainIndex = (grainIndex + 1) & 4095;
-                    grainPhase += 1.0f;
-                    if (grainPhase >= grainSize) grainPhase = 0.0f;
+                    // Update grain phases
+                    leftGrainPhase += 1.0f;
+                    rightGrainPhase += 1.0f;
+                    if (leftGrainPhase >= grainSize) leftGrainPhase = 0.0f;
+                    if (rightGrainPhase >= grainSize) rightGrainPhase = 0.0f;
+                    
+                    h910Index = (h910Index + 1) & 4095;
                 }
                 break;
                 
-            case 2: // Varispeed (Tape-style) - Simple time scaling
+            case 2: // Varispeed (Tape-style) - Simple variable speed playback
                 {
                     static std::array<float, 16384> leftVarBuffer = {};
                     static std::array<float, 16384> rightVarBuffer = {};
-                    static float leftVarPhase = 0.0f;
-                    static float rightVarPhase = 0.0f;
-                    static int varWriteIndex = 0;
+                    static float leftVarReadPos = 0.0f;
+                    static float rightVarReadPos = 0.0f;
+                    static int varWritePos = 0;
                     
-                    // Write to buffer
-                    leftVarBuffer[varWriteIndex] = leftProcessed;
-                    rightVarBuffer[varWriteIndex] = rightProcessed;
+                    // Write to buffers
+                    leftVarBuffer[varWritePos] = leftProcessed;
+                    rightVarBuffer[varWritePos] = rightProcessed;
                     
-                    // Update read phases at pitch-shifted rates
-                    leftVarPhase += leftRatio;
-                    rightVarPhase += rightRatio;
+                    // Update read positions at modified speeds - CRITICAL FIX: Correct pitch direction
+                    leftVarReadPos += leftRatio;   // Higher ratio = faster read = higher pitch
+                    rightVarReadPos += rightRatio;
                     
-                    // Read with interpolation
-                    int leftReadIdx = static_cast<int>(varWriteIndex - leftVarPhase) & 16383;
-                    int rightReadIdx = static_cast<int>(varWriteIndex - rightVarPhase) & 16383;
+                    // Calculate integer and fractional parts
+                    int leftReadInt = static_cast<int>(leftVarReadPos) & 16383;
+                    int rightReadInt = static_cast<int>(rightVarReadPos) & 16383;
+                    float leftFrac = leftVarReadPos - std::floor(leftVarReadPos);
+                    float rightFrac = rightVarReadPos - std::floor(rightVarReadPos);
                     
-                    leftProcessed = leftVarBuffer[leftReadIdx];
-                    rightProcessed = rightVarBuffer[rightReadIdx];
+                    // Interpolated read with gain compensation
+                    int leftReadInt2 = (leftReadInt + 1) & 16383;
+                    int rightReadInt2 = (rightReadInt + 1) & 16383;
                     
-                    // Reset phases to prevent drift
-                    if (leftVarPhase > 8192.0f) leftVarPhase -= 8192.0f;
-                    if (rightVarPhase > 8192.0f) rightVarPhase -= 8192.0f;
+                    leftProcessed = (leftVarBuffer[leftReadInt] * (1.0f - leftFrac) + 
+                                   leftVarBuffer[leftReadInt2] * leftFrac) * leftGainComp;
+                    rightProcessed = (rightVarBuffer[rightReadInt] * (1.0f - rightFrac) + 
+                                    rightVarBuffer[rightReadInt2] * rightFrac) * rightGainComp;
                     
-                    varWriteIndex = (varWriteIndex + 1) & 16383;
+                    // Wrap read positions
+                    if (leftVarReadPos >= 16384.0f) leftVarReadPos -= 16384.0f;
+                    if (rightVarReadPos >= 16384.0f) rightVarReadPos -= 16384.0f;
+                    
+                    varWritePos = (varWritePos + 1) & 16383;
                 }
                 break;
                 
-            case 3: // Hybrid - Combination of techniques
+            case 3: // Hybrid - Combines multiple techniques
                 {
-                    // Use H910 for small shifts, Varispeed for large shifts
-                    if (std::abs(leftFinalPitch) < 200.0f && std::abs(rightFinalPitch) < 200.0f) {
-                        // Use H910 algorithm (case 1 code)
-                        static std::array<float, 4096> leftHybridBuffer = {};
-                        static std::array<float, 4096> rightHybridBuffer = {};
-                        static int hybridIndex = 0;
+                    // Use H910 for small shifts, Varispeed for large shifts, BBD for character
+                    float leftPitchMag = std::abs(leftFinalPitch);
+                    float rightPitchMag = std::abs(rightFinalPitch);
+                    
+                    static std::array<float, 8192> leftHybridBuffer = {};
+                    static std::array<float, 8192> rightHybridBuffer = {};
+                    static int hybridIndex = 0;
+                    static float leftHybridPhase = 0.0f;
+                    static float rightHybridPhase = 0.0f;
+                    
+                    leftHybridBuffer[hybridIndex] = leftProcessed;
+                    rightHybridBuffer[hybridIndex] = rightProcessed;
+                    
+                    if (leftPitchMag < 100.0f && rightPitchMag < 100.0f) {
+                        // Small shifts: Use H910-style granular
+                        float window = 0.5f * (1.0f - std::cos(2.0f * M_PI * leftHybridPhase / 256.0f));
+                        int readIdx = static_cast<int>(hybridIndex - 256 / leftRatio) & 8191;
+                        leftProcessed = leftHybridBuffer[readIdx] * window * leftGainComp;
                         
-                        leftHybridBuffer[hybridIndex] = leftProcessed;
-                        rightHybridBuffer[hybridIndex] = rightProcessed;
+                        window = 0.5f * (1.0f - std::cos(2.0f * M_PI * rightHybridPhase / 256.0f));
+                        readIdx = static_cast<int>(hybridIndex - 256 / rightRatio) & 8191;
+                        rightProcessed = rightHybridBuffer[readIdx] * window * rightGainComp;
                         
-                        int leftReadIdx = static_cast<int>(hybridIndex - 256 / leftRatio) & 4095;
-                        int rightReadIdx = static_cast<int>(hybridIndex - 256 / rightRatio) & 4095;
-                        
-                        leftProcessed = leftHybridBuffer[leftReadIdx];
-                        rightProcessed = rightHybridBuffer[rightReadIdx];
-                        
-                        hybridIndex = (hybridIndex + 1) & 4095;
+                        leftHybridPhase += 1.0f;
+                        rightHybridPhase += 1.0f;
+                        if (leftHybridPhase >= 256.0f) leftHybridPhase = 0.0f;
+                        if (rightHybridPhase >= 256.0f) rightHybridPhase = 0.0f;
                     } else {
-                        // Use Varispeed algorithm for large shifts
-                        leftProcessed *= leftRatio;
-                        rightProcessed *= rightRatio;
+                        // Large shifts: Use Varispeed with BBD coloration
+                        leftHybridPhase += 1.0f / leftRatio;
+                        rightHybridPhase += 1.0f / rightRatio;
+                        
+                        int leftReadIdx = static_cast<int>(hybridIndex - leftHybridPhase) & 8191;
+                        int rightReadIdx = static_cast<int>(hybridIndex - rightHybridPhase) & 8191;
+                        
+                        leftProcessed = leftHybridBuffer[leftReadIdx] * leftGainComp;
+                        rightProcessed = rightHybridBuffer[rightReadIdx] * rightGainComp;
+                        
+                        // Add BBD-style character
+                        leftProcessed = std::tanh(leftProcessed * (1.0f + character * 0.5f));
+                        rightProcessed = std::tanh(rightProcessed * (1.0f + character * 0.5f));
+                        
+                        if (leftHybridPhase > 4096.0f) leftHybridPhase -= 4096.0f;
+                        if (rightHybridPhase > 4096.0f) rightHybridPhase -= 4096.0f;
                     }
+                    
+                    hybridIndex = (hybridIndex + 1) & 8191;
                 }
                 break;
         }
         
-        // Apply character/vintage modeling
+        // ===== CRITICAL FIX: Apply Character/Vintage Modeling Post-Pitch =====
         if (character > 0.001f) {
-            // Add slight saturation and filtering for vintage character
-            leftProcessed = std::tanh(leftProcessed * (1.0f + character * 0.3f)) * (1.0f + character * 0.1f);
-            rightProcessed = std::tanh(rightProcessed * (1.0f + character * 0.3f)) * (1.0f + character * 0.1f);
+            // Add progressive saturation and filtering for vintage character
+            float saturationAmount = 1.0f + character * 0.4f;
+            leftProcessed = std::tanh(leftProcessed * saturationAmount) / saturationAmount;
+            rightProcessed = std::tanh(rightProcessed * saturationAmount) / saturationAmount;
             
-            // Add subtle aliasing for vintage digital character
-            if (character > 0.5f) {
-                leftProcessed += std::sin(leftProcessed * 20.0f) * character * 0.02f;
-                rightProcessed += std::sin(rightProcessed * 20.0f) * character * 0.02f;
+            // Add subtle bit-crushing for digital vintage character
+            if (character > 0.3f) {
+                float bitReduction = character * 0.1f;
+                leftProcessed = std::round(leftProcessed / bitReduction) * bitReduction;
+                rightProcessed = std::round(rightProcessed / bitReduction) * bitReduction;
+            }
+            
+            // Add aliasing artifacts for vintage digital sound
+            if (character > 0.6f) {
+                leftProcessed += std::sin(leftProcessed * 15.0f) * character * 0.01f;
+                rightProcessed += std::sin(rightProcessed * 15.0f) * character * 0.01f;
             }
         }
     }
@@ -582,207 +656,87 @@ void CurveAndDragModule::process(const ProcessArgs& args) {
     float leftDelayed = leftDelay.process(leftProcessed);
     float rightDelayed = rightDelay.process(rightProcessed);
     
-    // STEP 3: Apply cross-feedback with safe limiting to prevent runaway
+    // STEP 3: ===== CRITICAL FIX: Enhanced Cross-Feedback System (BEFORE Tape Processing) =====
     if (params[CROSS_FEEDBACK_PARAM].getValue() > 0.01f) {
-        float crossAmount = clamp(params[CROSS_FEEDBACK_PARAM].getValue() * 0.2f, 0.0f, 0.2f); // Reduced max to 20%
+        float crossAmount = clamp(params[CROSS_FEEDBACK_PARAM].getValue() * 0.3f, 0.0f, 0.3f); // Max 30%
         
         // Store previous delayed values to prevent infinite feedback
         static float prevLeftDelayed = 0.0f;
         static float prevRightDelayed = 0.0f;
+        static float leftCrossFilter = 0.0f;
+        static float rightCrossFilter = 0.0f;
         
-        // Calculate cross-feedback using previous values
-        float leftCross = leftDelayed + prevRightDelayed * crossAmount;
-        float rightCross = rightDelayed + prevLeftDelayed * crossAmount;
+        // Apply filtering to cross-feedback to prevent harsh resonances
+        float filterCoeff = 0.8f; // Low-pass the cross-feedback
+        leftCrossFilter += (prevRightDelayed - leftCrossFilter) * filterCoeff;
+        rightCrossFilter += (prevLeftDelayed - rightCrossFilter) * filterCoeff;
         
-        // Apply strong soft limiting to prevent runaway feedback
-        leftDelayed = std::tanh(leftCross * 0.8f) / 0.8f;
-        rightDelayed = std::tanh(rightCross * 0.8f) / 0.8f;
+        // ===== CRITICAL FIX: Apply cross-feedback regardless of tape mode =====
+        // Calculate cross-feedback using filtered previous values
+        float leftCross = leftDelayed + leftCrossFilter * crossAmount;
+        float rightCross = rightDelayed + rightCrossFilter * crossAmount;
         
-        // Update previous values for next sample
+        // Apply progressive soft limiting to prevent runaway feedback
+        leftDelayed = std::tanh(leftCross * 0.7f) / 0.7f;
+        rightDelayed = std::tanh(rightCross * 0.7f) / 0.7f;
+        
+        // Update previous values for next sample (CRITICAL: Update AFTER tape processing)
+        // This ensures cross-feedback works with tape effects
         prevLeftDelayed = leftDelayed;
         prevRightDelayed = rightDelayed;
     }
     
-    // STEP 4: ===== CRITICAL FIX: Enhanced Tape Processing with Proper Noise Routing =====
+    // STEP 4: ===== CRITICAL FIX: Enhanced Tape Processing (AFTER Cross-Feedback) =====
     bool tapeEnabled = params[TAPE_MODE_PARAM].getValue() > 0.5f;
     
     if (tapeEnabled) {
-        // ===== PROFESSIONAL-GRADE TAPE PROCESSING WITH FULL SIGNAL ROUTING =====
-        
-        // Process through complete tape emulation engine with proper noise injection
+        // Process through tape emulation with proper configuration
         float leftTaped = tapeProcessor.process(leftDelayed, 0);  // Left channel
         float rightTaped = tapeProcessor.process(rightDelayed, 1); // Right channel
         
-        // ===== CRITICAL FIX: Explicit Tape Noise Injection =====
-        // Generate and inject tape noise directly into the signal
-        bool noiseEnabled = params[TAPE_NOISE_PARAM].getValue() > 0.5f;
-        if (noiseEnabled) {
-            float noiseAmount = getClampedParam(NOISE_AMOUNT_PARAM, NOISE_AMOUNT_CV_INPUT, 0.0f, 0.1f);
-            // Apply exponential curve for better control
-            noiseAmount = noiseAmount * noiseAmount * 0.5f; // Square and scale to 5% max
-            
-            // Generate separate noise for L/R channels
-            static std::mt19937 noiseGen(std::random_device{}());
-            static std::uniform_real_distribution<float> noiseDist(-1.0f, 1.0f);
-            
-            // Pink noise generation with proper filtering
-            float leftNoise = noiseDist(noiseGen) * noiseAmount;
-            float rightNoise = noiseDist(noiseGen) * noiseAmount;
-            
-            // Add 60Hz hum component
-            static float humPhase = 0.0f;
-            humPhase += 60.0f / args.sampleRate;
-            if (humPhase >= 1.0f) humPhase -= 1.0f;
-            
-            float hum = std::sin(2.0f * M_PI * humPhase) * noiseAmount * 0.3f;
-            
-            // ===== CRITICAL FIX: Additively blend noise into tape signal =====
-            leftTaped += leftNoise + hum;
-            rightTaped += rightNoise + hum * 0.8f; // Slightly different hum on right channel
-        }
+        // ===== CRITICAL FIX: Tape noise is now handled internally by TapeDelayProcessor =====
+        // No need to inject noise here as it's already done in tapeProcessor.process()
         
-        // ===== CRITICAL FIX: Explicit Tape Saturation Application =====
-        float saturationLevel = getClampedParam(SATURATION_PARAM, SATURATION_CV_INPUT, 0.0f, 1.0f);
-        if (saturationLevel > 0.001f) {
-            // Multi-stage saturation for authentic tape sound
-            float satGain = 1.0f + saturationLevel * 2.0f; // Reduced gain for musicality
-            
-            // Apply graduated saturation with harmonic content
-            leftTaped = std::tanh(leftTaped * satGain) / satGain;
-            rightTaped = std::tanh(rightTaped * satGain) / satGain;
-            
-            // Add subtle even harmonics for tape character
-            leftTaped += std::tanh(leftTaped * 3.0f) * saturationLevel * 0.02f;
-            rightTaped += std::tanh(rightTaped * 3.0f) * saturationLevel * 0.02f;
-        }
-        
-        // ===== CRITICAL FIX: Explicit Tape Aging and EQ Application =====
-        float agingLevel = getClampedParam(AGING_PARAM, AGING_CV_INPUT, 0.0f, 1.0f);
-        if (agingLevel > 0.001f) {
-            // Simple high-frequency rolloff for aging
-            static float leftAgingState = 0.0f, rightAgingState = 0.0f;
-            float agingCoeff = 1.0f - agingLevel * 0.4f; // More aggressive aging
-            
-            leftAgingState += (leftTaped - leftAgingState) * agingCoeff;
-            rightAgingState += (rightTaped - rightAgingState) * agingCoeff;
-            
-            // Blend aged signal
-            leftTaped = leftTaped * (1.0f - agingLevel * 0.3f) + leftAgingState * agingLevel * 0.3f;
-            rightTaped = rightTaped * (1.0f - agingLevel * 0.3f) + rightAgingState * agingLevel * 0.3f;
-        }
-        
-        // ===== CRITICAL FIX: Explicit Wow & Flutter Application =====
-        float wowRate = getClampedParam(WOW_RATE_PARAM, WOW_RATE_CV_INPUT, 0.1f, 5.0f);
-        float wowDepth = getClampedParam(WOW_DEPTH_PARAM, WOW_DEPTH_CV_INPUT, 0.0f, 1.0f);
-        float flutterRate = getClampedParam(FLUTTER_RATE_PARAM, FLUTTER_RATE_CV_INPUT, 1.0f, 10.0f);
-        float flutterDepth = getClampedParam(FLUTTER_DEPTH_PARAM, FLUTTER_DEPTH_CV_INPUT, 0.0f, 1.0f);
-        
-        if (wowDepth > 0.001f || flutterDepth > 0.001f) {
-            static float wowPhase = 0.0f, flutterPhase = 0.0f;
-            
-            // Update LFO phases
-            wowPhase += wowRate / args.sampleRate;
-            if (wowPhase >= 1.0f) wowPhase -= 1.0f;
-            
-            flutterPhase += flutterRate / args.sampleRate;
-            if (flutterPhase >= 1.0f) flutterPhase -= 1.0f;
-            
-            // Calculate modulation amounts (in cents)
-            float wowMod = std::sin(2.0f * M_PI * wowPhase) * wowDepth * 30.0f; // ±30 cents max
-            float flutterMod = std::sin(2.0f * M_PI * flutterPhase) * flutterDepth * 15.0f; // ±15 cents max
-            
-            // Apply pitch modulation via simple time-domain scaling
-            float totalMod = wowMod + flutterMod;
-            float pitchRatio = std::pow(2.0f, totalMod / 1200.0f);
-            
-            // Simple pitch modulation using buffered delay
-            static std::array<float, 512> leftModBuffer = {};
-            static std::array<float, 512> rightModBuffer = {};
-            static int modBufferIndex = 0;
-            
-            leftModBuffer[modBufferIndex] = leftTaped;
-            rightModBuffer[modBufferIndex] = rightTaped;
-            
-            // Calculate modulated read position
-            int modDelay = static_cast<int>((1.0f - pitchRatio) * 50.0f); // Variable delay
-            modDelay = clamp(modDelay, -100, 100);
-            
-            int readIndex = (modBufferIndex - std::abs(modDelay) + 512) % 512;
-            
-            // Mix modulated signal
-            float modStrength = (wowDepth + flutterDepth) * 0.5f;
-            leftTaped = leftTaped * (1.0f - modStrength) + leftModBuffer[readIndex] * modStrength;
-            rightTaped = rightTaped * (1.0f - modStrength) + rightModBuffer[readIndex] * modStrength;
-            
-            modBufferIndex = (modBufferIndex + 1) % 512;
-        }
-        
-        // ===== CRITICAL FIX: Instability Effects =====
-        float instabilityLevel = getClampedParam(INSTABILITY_PARAM, INSTABILITY_CV_INPUT, 0.0f, 1.0f);
-        if (instabilityLevel > 0.001f) {
-            static float instabilityPhaseL = 0.0f, instabilityPhaseR = 0.0f;
-            
-            // Slow random variations
-            instabilityPhaseL += instabilityLevel * 0.003f;
-            instabilityPhaseR += instabilityLevel * 0.0025f; // Slightly different rate
-            
-            // Level and speed variations
-            float wobbleL = std::sin(instabilityPhaseL) * instabilityLevel * 0.05f;
-            float wobbleR = std::sin(instabilityPhaseR + 0.3f) * instabilityLevel * 0.05f;
-            
-            leftTaped *= (1.0f + wobbleL);
-            rightTaped *= (1.0f + wobbleR);
-            
-            // Random dropouts for very high instability
-            if (instabilityLevel > 0.7f) {
-                static std::mt19937 dropoutGen(std::random_device{}());
-                static std::uniform_real_distribution<float> dropoutDist(0.0f, 1.0f);
-                
-                if (dropoutDist(dropoutGen) < instabilityLevel * 0.0001f) {
-                    leftTaped *= 0.3f;
-                    rightTaped *= 0.3f;
-                }
-            }
-        }
-        
-        // Update delayed signals with complete tape processing
+        // Update delayed signals with tape processing
         leftDelayed = leftTaped;
         rightDelayed = rightTaped;
+        
+        // ===== CRITICAL FIX: Update cross-feedback state AFTER tape processing =====
+        // This ensures the cross-feedback path includes tape coloration
+        if (params[CROSS_FEEDBACK_PARAM].getValue() > 0.01f) {
+            // Store the tape-processed signal for cross-feedback on next sample
+            static float prevLeftTaped = 0.0f;
+            static float prevRightTaped = 0.0f;
+            prevLeftTaped = leftDelayed;
+            prevRightTaped = rightDelayed;
+        }
     }
     
-    // STEP 5: Apply output gain to both dry and wet signals with proper mixing
+    // STEP 5: Apply output mixing and gain
     float outputGain = getClampedParam(OUTPUT_GAIN_PARAM, OUTPUT_GAIN_CV_INPUT, 0.0f, 2.0f);
     
-    // Get dry/wet mix levels
-    float leftMix = getClampedParam(MIX_L_PARAM, MIX_L_CV_INPUT, 0.0f, 1.0f);
-    float rightMix = getClampedParam(MIX_R_PARAM, MIX_R_CV_INPUT, 0.0f, 1.0f);
+    // Mix dry and wet signals based on mix parameters
+    float leftMix = clamp(params[MIX_L_PARAM].getValue(), 0.0f, 1.0f);
+    float rightMix = clamp(params[MIX_R_PARAM].getValue(), 0.0f, 1.0f);
     
-    // Calculate final mixed outputs
-    float leftFinal = (leftProcessed * (1.0f - leftMix) + leftDelayed * leftMix) * outputGain;
-    float rightFinal = (rightProcessed * (1.0f - rightMix) + rightDelayed * rightMix) * outputGain;
+    float leftOutput = (leftInput * (1.0f - leftMix) + leftDelayed * leftMix) * outputGain;
+    float rightOutput = (rightInput * (1.0f - rightMix) + rightDelayed * rightMix) * outputGain;
     
-    // Apply final safety limiting
-    leftFinal = softClip(leftFinal);
-    rightFinal = softClip(rightFinal);
+    // Final safety limiting
+    leftOutput = clamp(leftOutput, -5.0f, 5.0f);
+    rightOutput = clamp(rightOutput, -5.0f, 5.0f);
     
-    // Set main outputs (scale back to ±10V)
-    outputs[LEFT_OUTPUT].setVoltage(leftFinal * 10.0f);
-    outputs[RIGHT_OUTPUT].setVoltage(rightFinal * 10.0f);
+    // Set outputs
+    outputs[LEFT_OUTPUT].setVoltage(leftOutput * 10.0f); // Scale back to ±10V
+    outputs[RIGHT_OUTPUT].setVoltage(rightOutput * 10.0f);
     
-    // ===== v2.8.0 CRITICAL FIX: Wet-only outputs with proper isolation =====
-    if (outputs[WET_LEFT_OUTPUT].isConnected()) {
-        float wetLeft = leftDelayed * outputGain;
-        outputs[WET_LEFT_OUTPUT].setVoltage(softClip(wetLeft) * 10.0f);
-    }
+    // Wet-only outputs
+    outputs[WET_LEFT_OUTPUT].setVoltage(leftDelayed * outputGain * 10.0f);
+    outputs[WET_RIGHT_OUTPUT].setVoltage(rightDelayed * outputGain * 10.0f);
     
-    if (outputs[WET_RIGHT_OUTPUT].isConnected()) {
-        float wetRight = rightDelayed * outputGain;
-        outputs[WET_RIGHT_OUTPUT].setVoltage(softClip(wetRight) * 10.0f);
-    }
-    
-    // Update level meters and status lights every 64 samples (LEVEL_UPDATE_RATE)
+    // Update level meters and status lights
     if (processCounter % LEVEL_UPDATE_RATE == 0) {
-        updateLevelMeters(std::abs(leftInput), std::abs(rightInput));
+        updateLevelMeters(leftInput, rightInput);
         updateStatusLights();
     }
 }

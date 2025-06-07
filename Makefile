@@ -4,7 +4,7 @@
 RACK_DIR ?= ../Rack-WIN-SDK
 
 # FLAGS will be passed to both the C and C++ compiler
-FLAGS += -I./src
+FLAGS += -I./src -D_USE_MATH_DEFINES
 CFLAGS +=
 CXXFLAGS += -std=c++17
 

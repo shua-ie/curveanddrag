@@ -1,31 +1,31 @@
 {
   "slug": "CurveAndDrag",
-  "name": "Curve&Drag",
-  "version": "2.8.0",
-  "license": "GPL-3.0-or-later",
-  "brand": "Curve&Drag",
-  "author": "Curve&Drag Team",
-  "authorEmail": "info@curvedrag.com",
-  "authorUrl": "https://github.com/your-username/Curve-and-Drag",
-  "pluginUrl": "https://github.com/your-username/Curve-and-Drag",
-  "manualUrl": "https://github.com/your-username/Curve-and-Drag/blob/main/README.md",
-  "sourceUrl": "https://github.com/your-username/Curve-and-Drag",
+  "name": "CurveAndDrag",
+  "version": "1.0",
+  "license": "MIT",
+  "brand": "CurveAndDrag",
+  "author": "Joshua McDonagh",
+  "authorEmail": "josh.mcd31@gmail.com",
+  "authorUrl": "https://github.com/shua-ie/curveanddrag",
+  "pluginUrl": "https://github.com/shua-ie/curveanddrag",
+  "manualUrl": "",
+  "sourceUrl": "",
   "donateUrl": "",
   "changelogUrl": "https://github.com/your-username/Curve-and-Drag/releases",
   "modules": [
     {
       "slug": "CurveAndDrag",
-      "name": "Curve&Drag",
-      "description": "Stereo delay and pitch shifter with MTS-ESP microtonal support, tape-style effects, and comprehensive CV control for creative sound design",
+      "name": "CurveAndDrag",
+      "description": "Professional stereo delay with pitch shifting, tape DSP, modulation, and comprehensive tuning system",
       "width": 48,
       "tags": [
-        "Effect",
         "Delay",
-        "Pitch shifter",
-        "Microtonal",
+        "Pitch shifter", 
+        "Effect",
         "Stereo",
+        "Polyphonic",
         "Tape",
-        "Polyphonic"
+        "Tuning"
       ]
     }
   ]

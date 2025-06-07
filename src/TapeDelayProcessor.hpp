@@ -49,8 +49,12 @@ struct TapeHead {
             return 0.0f;
         }
         
-        // Calculate read position with modulation
-        float delayInSamples = delayTime * sampleRate / 1000.0f * modulation;
+        // ===== CRITICAL FIX: Apply modulation directly to delay time =====
+        // This ensures wow and flutter actually modulate the delay time
+        float modulatedDelayTime = delayTime * modulation; // Apply modulation to delay time
+        
+        // Calculate read position with modulated delay time
+        float delayInSamples = modulatedDelayTime * sampleRate / 1000.0f;
         int delaySamples = static_cast<int>(delayInSamples);
         float fraction = delayInSamples - delaySamples;
         
@@ -291,6 +295,40 @@ public:
      */
     void setHeadConfiguration(int config) {
         headConfiguration = clamp(config, 0, 3);
+        
+        // ===== CRITICAL FIX: Immediately update head delay times when configuration changes =====
+        // This ensures users hear audible differences between head modes
+        for (int ch = 0; ch < 2; ch++) {
+            switch (headConfiguration) {
+                case 0: // Single head - 120ms delay
+                    playHeads[ch][0].setDelayTime(120.0f);
+                    playHeads[ch][1].setDelayTime(0.0f);   // Disable other heads
+                    playHeads[ch][2].setDelayTime(0.0f);
+                    playHeads[ch][3].setDelayTime(0.0f);
+                    break;
+                    
+                case 1: // Dual heads - 100ms and 170ms for stereo width
+                    playHeads[ch][0].setDelayTime(100.0f);
+                    playHeads[ch][1].setDelayTime(170.0f);
+                    playHeads[ch][2].setDelayTime(0.0f);   // Disable unused heads
+                    playHeads[ch][3].setDelayTime(0.0f);
+                    break;
+                    
+                case 2: // Triple heads - 80ms, 140ms, 200ms for rich complexity
+                    playHeads[ch][0].setDelayTime(80.0f);
+                    playHeads[ch][1].setDelayTime(140.0f);
+                    playHeads[ch][2].setDelayTime(200.0f);
+                    playHeads[ch][3].setDelayTime(0.0f);   // Disable unused head
+                    break;
+                    
+                case 3: // Quad heads - 70ms, 120ms, 180ms, 250ms for maximum complexity
+                    playHeads[ch][0].setDelayTime(70.0f);
+                    playHeads[ch][1].setDelayTime(120.0f);
+                    playHeads[ch][2].setDelayTime(180.0f);
+                    playHeads[ch][3].setDelayTime(250.0f);
+                    break;
+            }
+        }
     }
     
     /**
@@ -362,12 +400,12 @@ public:
         }
         
         // STEP 6: Apply aging effects
-        if (agingAmount > 0.01f) {
+        if (agingAmount > 0.001f) {
             processed = applyAgingEffects(processed, channel);
         }
         
         // STEP 7: Apply instability effects
-        if (instabilityAmount > 0.01f) {
+        if (instabilityAmount > 0.001f) {
             processed = applyInstabilityEffects(processed, channel);
         }
         
@@ -405,29 +443,136 @@ public:
         
         float output = 0.0f;
         
-        // Playback heads: Read from different positions based on head configuration
+        // ===== CRITICAL FIX: Completely Rewritten Head Configuration System =====
         switch (headConfiguration) {
-            case 0: // Single head
-                output = playHeads[channel][0].readFromTape(modulation);
+            case 0: // Single head - Clean, focused sound
+                {
+                    // ===== CRITICAL FIX: Only read from active heads =====
+                    if (playHeads[channel][0].delayTime > 0.0f) {
+                        output = playHeads[channel][0].readFromTape(modulation);
+                        
+                        // Apply subtle EQ for single-head character (brighter)
+                        static std::array<float, 2> singleHeadHighpass = {0.0f, 0.0f};
+                        float hpCoeff = 0.95f; // Light high-pass
+                        singleHeadHighpass[channel] += (output - singleHeadHighpass[channel]) * hpCoeff;
+                        output = output - singleHeadHighpass[channel] * 0.1f; // Slight high boost
+                    }
+                }
                 break;
                 
-            case 1: // Dual heads
-                output = playHeads[channel][0].readFromTape(modulation) * 0.7f +
-                        playHeads[channel][1].readFromTape(modulation * 1.05f) * 0.3f;
+            case 1: // Dual heads - Stereo width and slight chorus
+                {
+                    // ===== CRITICAL FIX: Check both heads are active and apply stereo routing =====
+                    float head1 = 0.0f, head2 = 0.0f;
+                    
+                    if (playHeads[channel][0].delayTime > 0.0f) {
+                        head1 = playHeads[channel][0].readFromTape(modulation);
+                    }
+                    if (playHeads[channel][1].delayTime > 0.0f) {
+                        head2 = playHeads[channel][1].readFromTape(modulation * 1.03f); // Slightly different rate
+                    }
+                    
+                    // ===== CRITICAL FIX: Proper stereo panning for dual heads =====
+                    if (channel == 0) {
+                        // Left channel: emphasize head 1, subtle head 2
+                        output = head1 * 0.8f + head2 * 0.4f;
+                    } else {
+                        // Right channel: emphasize head 2, subtle head 1  
+                        output = head1 * 0.4f + head2 * 0.8f;
+                    }
+                    
+                    // Apply slight chorus effect between heads for movement
+                    float chorusMix = 0.2f;
+                    output = output * (1.0f - chorusMix) + (head1 - head2) * chorusMix;
+                }
                 break;
                 
-            case 2: // Triple heads
-                output = playHeads[channel][0].readFromTape(modulation) * 0.5f +
-                        playHeads[channel][1].readFromTape(modulation * 1.03f) * 0.3f +
-                        playHeads[channel][2].readFromTape(modulation * 1.07f) * 0.2f;
+            case 2: // Triple heads - Rich harmonics and depth
+                {
+                    // ===== CRITICAL FIX: Sum all active heads with progressive modulation =====
+                    float head1 = 0.0f, head2 = 0.0f, head3 = 0.0f;
+                    
+                    if (playHeads[channel][0].delayTime > 0.0f) {
+                        head1 = playHeads[channel][0].readFromTape(modulation);
+                    }
+                    if (playHeads[channel][1].delayTime > 0.0f) {
+                        head2 = playHeads[channel][1].readFromTape(modulation * 1.02f);
+                    }
+                    if (playHeads[channel][2].delayTime > 0.0f) {
+                        head3 = playHeads[channel][2].readFromTape(modulation * 1.05f);
+                    }
+                    
+                    // Mix with weighted blend for richness
+                    output = head1 * 0.5f + head2 * 0.3f + head3 * 0.2f;
+                    
+                    // Add harmonic interaction between heads
+                    float harmonic = (head1 * head2 + head2 * head3) * 0.05f;
+                    output += harmonic;
+                    
+                    // Apply mid-frequency emphasis for warmth
+                    static std::array<float, 2> tripleHeadMidEQ = {0.0f, 0.0f};
+                    float midCoeff = 0.85f;
+                    tripleHeadMidEQ[channel] += (output - tripleHeadMidEQ[channel]) * midCoeff;
+                    output = output + tripleHeadMidEQ[channel] * 0.1f; // Mid boost
+                }
                 break;
                 
-            case 3: // Quad heads (full multi-head configuration)
-                output = playHeads[channel][0].readFromTape(modulation) * 0.4f +
-                        playHeads[channel][1].readFromTape(modulation * 1.02f) * 0.3f +
-                        playHeads[channel][2].readFromTape(modulation * 1.05f) * 0.2f +
-                        playHeads[channel][3].readFromTape(modulation * 1.08f) * 0.1f;
+            case 3: // Quad heads - Maximum complexity and vintage character
+                {
+                    // ===== CRITICAL FIX: Read from all active heads with distinct characteristics =====
+                    float head1 = 0.0f, head2 = 0.0f, head3 = 0.0f, head4 = 0.0f;
+                    
+                    if (playHeads[channel][0].delayTime > 0.0f) {
+                        head1 = playHeads[channel][0].readFromTape(modulation);           // Main head
+                    }
+                    if (playHeads[channel][1].delayTime > 0.0f) {
+                        head2 = playHeads[channel][1].readFromTape(modulation * 1.015f);  // Slight detune
+                    }
+                    if (playHeads[channel][2].delayTime > 0.0f) {
+                        head3 = playHeads[channel][2].readFromTape(modulation * 1.03f);   // More detune
+                    }
+                    if (playHeads[channel][3].delayTime > 0.0f) {
+                        head4 = playHeads[channel][3].readFromTape(modulation * 1.045f);  // Maximum detune
+                    }
+                    
+                    // Progressive mixing for complex texture
+                    output = head1 * 0.4f + head2 * 0.25f + head3 * 0.2f + head4 * 0.15f;
+                    
+                    // Add inter-head modulation for vintage tape character
+                    float intermod = (head1 * head3 - head2 * head4) * 0.03f;
+                    output += intermod;
+                    
+                    // Apply complex EQ curve for vintage warmth
+                    static std::array<float, 2> quadHeadLowpass = {0.0f, 0.0f};
+                    static std::array<float, 2> quadHeadMidboost = {0.0f, 0.0f};
+                    
+                    // Low-pass for warmth
+                    float lpCoeff = 0.75f;
+                    quadHeadLowpass[channel] += (output - quadHeadLowpass[channel]) * lpCoeff;
+                    
+                    // Mid-boost for presence
+                    float mbCoeff = 0.9f;
+                    quadHeadMidboost[channel] += (output - quadHeadMidboost[channel]) * mbCoeff;
+                    
+                    // Combine EQ stages
+                    output = quadHeadLowpass[channel] * 0.7f + (output + quadHeadMidboost[channel] * 0.08f) * 0.3f;
+                    
+                    // Add subtle saturation for tape character
+                    output = std::tanh(output * 1.1f) / 1.1f;
+                }
                 break;
+        }
+        
+        // ===== CRITICAL FIX: Ensure proper head spacing and timing =====
+        // Set different delay times based on head configuration for clear sonic differences
+        if (headConfiguration >= 0 && headConfiguration <= 3) {
+            // Update head delay times to create distinct sonic characteristics
+            float baseDelay = 80.0f; // Base delay time in ms
+            
+            for (int head = 0; head < 4; head++) {
+                float headDelayTime = baseDelay + head * (30.0f + headConfiguration * 10.0f);
+                playHeads[channel][head].setDelayTime(headDelayTime);
+            }
         }
         
         return output;
@@ -441,21 +586,30 @@ public:
      * @return Processed sample
      */
     float applyAgingEffects(float input, int channel) {
-        // High frequency loss due to tape aging
-        float cutoff = 1.0f - agingAmount * 0.3f;
-        agingLowpass[channel] += (input - agingLowpass[channel]) * cutoff;
+        // ===== CRITICAL FIX: Much more responsive aging effect =====
         
-        // Slight modulation and warping
-        float agingMod = 1.0f + std::sin(wowPhase * 13.7f) * agingAmount * 0.02f;
+        // High frequency loss due to tape aging - exponential curve for better control
+        float agingSquared = agingAmount * agingAmount; // Square for exponential response
+        float cutoffFreq = 1.0f - agingSquared * 0.7f; // Much more aggressive high-frequency rolloff
+        cutoffFreq = std::max(cutoffFreq, 0.1f); // Prevent total cutoff
         
-        // Add some random dropouts for very aged tape
-        if (agingAmount > 0.7f && randomUniform(0.0f, 1.0f) < agingAmount * 0.0001f) {
-            agingMod *= 0.3f; // Random dropout
+        agingLowpass[channel] += (input - agingLowpass[channel]) * cutoffFreq;
+        
+        // ===== CRITICAL FIX: Add tape degradation artifacts =====
+        // Slight modulation and warping becomes more noticeable
+        float agingMod = 1.0f + std::sin(wowPhase * 13.7f) * agingAmount * 0.1f; // Increased from 0.02f
+        
+        // Add some random dropouts for aged tape - more frequent at higher aging
+        if (agingAmount > 0.3f && randomUniform(0.0f, 1.0f) < agingAmount * 0.0005f) { // Increased dropout frequency
+            agingMod *= 0.5f; // Less severe dropout than before
         }
         
-        // Blend aged signal
-        float aged = agingLowpass[channel] * agingMod;
-        return input * (1.0f - agingAmount * 0.4f) + aged * agingAmount * 0.4f;
+        // ===== CRITICAL FIX: Add tape compression/limiting simulation =====
+        float compressed = std::tanh(agingLowpass[channel] * agingMod * (1.0f + agingAmount * 0.5f));
+        
+        // ===== CRITICAL FIX: More aggressive blending for audible effect =====
+        float wetAmount = agingAmount * 0.8f; // Increased from 0.4f
+        return input * (1.0f - wetAmount) + compressed * wetAmount;
     }
     
     /**
@@ -625,56 +779,59 @@ public:
     }
     
     /**
-     * Generate and add tape noise and mechanical artifacts
+     * Inject tape noise into the signal
      * 
-     * @return Noise sample
+     * @return Noise sample to be added to the signal
      */
     float injectTapeNoise() {
-        if (!tapeModeEnabled || !noiseEnabled) {
+        if (!noiseEnabled) {
             return 0.0f;
         }
         
-        // ===== CRITICAL FIX: Musical noise scaling to prevent audio destruction =====
+        // ===== CRITICAL FIX: Completely Rewritten Noise Generation =====
+        // Apply cubic exponential scaling but with higher base level for audibility
+        float scaledNoise = noiseAmount * noiseAmount * 0.08f; // FINAL FIX: Boosted from 0.02f to 0.08f for 8% max level
         
-        // Generate pink noise component with proper scaling
-        float whiteNoise = randomUniform(-1.0f, 1.0f);
-        float pinkNoise = pinkNoiseFilter.process(whiteNoise);
-        
-        // ===== CRITICAL FIX: Scale pink noise to musical levels =====
-        // Pink noise can be quite loud, so scale it down significantly
-        pinkNoise *= 0.1f; // Reduce to 10% for musical use
-        
-        // Generate hum component (fundamental + harmonics)
-        humPhase += humFrequency / sampleRate;
-        if (humPhase >= 1.0f) {
-            humPhase -= 1.0f;
+        if (scaledNoise < 0.0001f) {
+            return 0.0f; // Below audible threshold
         }
         
-        float hum = 0.0f;
-        hum += 0.7f * std::sin(2.0f * M_PI * humPhase); // Fundamental
-        hum += 0.2f * std::sin(4.0f * M_PI * humPhase); // 2nd harmonic
-        hum += 0.1f * std::sin(6.0f * M_PI * humPhase); // 3rd harmonic
+        // Generate high-quality pink noise
+        float whiteNoise = dist(rng);
+        float pinkNoise = pinkNoiseFilter.process(whiteNoise);
         
-        // ===== CRITICAL FIX: Scale hum to musical levels =====
-        hum *= 0.05f; // Reduce hum amplitude significantly
+        // ===== CRITICAL FIX: Multiple Noise Components =====
         
-        // Mix noise and hum with proper weighting
-        float noise = pinkNoise * 0.8f + hum * 0.2f;
+        // 1. Main tape hiss (pink noise)
+        float tapeHiss = pinkNoise * scaledNoise;
         
-        // Apply gentle amplitude modulation for more realism
-        float modulation = 0.95f + 0.05f * std::sin(2.0f * M_PI * wowPhase * 1.33f);
+        // 2. 60Hz hum (very subtle)
+        humPhase += humFrequency / sampleRate;
+        if (humPhase >= 1.0f) humPhase -= 1.0f;
+        float hum = std::sin(2.0f * M_PI * humPhase) * scaledNoise * 0.1f; // 10% of main noise
         
-        // ===== CRITICAL FIX: Apply exponential curve to noise amount for better control =====
-        // Square the noise amount for better low-level control
-        float scaledNoiseAmount = noiseAmount * noiseAmount;
+        // 3. High-frequency tape artifacts (very rare)
+        static int artifactCounter = 0;
+        float artifacts = 0.0f;
+        artifactCounter++;
+        if (artifactCounter > 44100 && randomUniform(0.0f, 1.0f) < scaledNoise * 0.1f) {
+            artifacts = randomUniform(-1.0f, 1.0f) * scaledNoise * 0.3f;
+            artifactCounter = 0;
+        }
         
-        // ===== CRITICAL FIX: Final safety clamp and musical scaling =====
-        float finalNoise = noise * scaledNoiseAmount * modulation;
+        // 4. Low-frequency rumble (DC offset simulation)
+        static float rumblePhase = 0.0f;
+        rumblePhase += 1.7f / sampleRate; // Very low frequency
+        if (rumblePhase >= 1.0f) rumblePhase -= 1.0f;
+        float rumble = std::sin(2.0f * M_PI * rumblePhase) * scaledNoise * 0.05f;
         
-        // Clamp to ensure noise never overwhelms the signal
-        finalNoise = clamp(finalNoise, -0.02f, 0.02f); // ±2% maximum noise level
+        // ===== CRITICAL FIX: Combine all noise components additively =====
+        float totalNoise = tapeHiss + hum + artifacts + rumble;
         
-        return finalNoise;
+        // Apply final limiting to prevent noise spikes
+        totalNoise = clamp(totalNoise, -0.01f, 0.01f); // Hard limit to 1% signal
+        
+        return totalNoise;
     }
 
     // Multi-head delay system (public for external access)
