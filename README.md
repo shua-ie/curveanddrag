@@ -1,5 +1,7 @@
 # CurveAndDrag
 
+![CurveAndDrag Module](res/CurveAndDrag.svg)
+
 📘 **Overview**
 
 CurveAndDrag is a professional stereo delay and pitch shifter module for VCV Rack featuring analog-inspired DSP, comprehensive tape delay modeling, and advanced microtonal tuning support. Combining four distinct pitch shifting algorithms with multi-head tape delay emulation, cross-channel feedback, and extensive CV automation, CurveAndDrag delivers studio-grade delay effects with vintage character and modern precision.
