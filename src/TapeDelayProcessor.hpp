@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cmath>
 #include <random>
+#include "FeedbackProcessor.hpp"
 
 namespace CurveAndDrag {
 
@@ -18,6 +19,92 @@ enum WowFlutterWaveform {
     SINE,
     TRIANGLE,
     RANDOM
+};
+
+/**
+ * Per-head pitch shifting and filter state
+ *
+ * Each tape playback head can independently:
+ * - Pitch shift ±24 semitones + ±99 cents
+ * - Apply SVF filter (LP/HP/BP/Notch) with cutoff and Q
+ * - Set individual level and pan
+ */
+struct PerHeadDSP {
+    // Pitch parameters
+    float pitchSemitones = 0.0f;  // ±24 semitones
+    float pitchCents = 0.0f;       // ±99 fine tune cents
+    float level = 1.0f;            // 0-1 head level
+    float pan = 0.5f;              // 0=left, 0.5=center, 1=right
+
+    // SVF filter per head
+    SVFilter filter;
+    SVFilter::Mode filterMode = SVFilter::OFF;
+    float filterCutoff = 8000.0f;
+    float filterQ = 0.0f;
+
+    // Pitch shifting state (simple varispeed for tape heads)
+    float readPhase = 0.0f;
+    std::array<float, 4096> pitchBuffer = {};
+    int pitchWritePos = 0;
+
+    void reset() {
+        filter.reset();
+        readPhase = 0.0f;
+        pitchBuffer.fill(0.0f);
+        pitchWritePos = 0;
+    }
+
+    /**
+     * Process: pitch shift + filter a single head's output
+     */
+    float process(float input, float sampleRate) {
+        float processed = input;
+
+        // Apply pitch shifting if non-zero
+        float totalCents = pitchSemitones * 100.0f + pitchCents;
+        if (std::abs(totalCents) > 1.0f) {
+            float ratio = std::pow(2.0f, totalCents / 1200.0f);
+            ratio = clamp(ratio, 0.25f, 4.0f);
+
+            // Write to pitch buffer
+            pitchBuffer[pitchWritePos] = input;
+            pitchWritePos = (pitchWritePos + 1) & 4095;
+
+            // Read at shifted rate with linear interpolation
+            readPhase += ratio;
+            if (readPhase >= 4096.0f) readPhase -= 4096.0f;
+            if (readPhase < 0.0f) readPhase += 4096.0f;
+
+            int idx0 = static_cast<int>(readPhase) & 4095;
+            int idx1 = (idx0 + 1) & 4095;
+            float frac = readPhase - std::floor(readPhase);
+            processed = pitchBuffer[idx0] * (1.0f - frac) + pitchBuffer[idx1] * frac;
+
+            // Gain compensation
+            float gainComp = 1.0f / std::sqrt(std::abs(ratio));
+            gainComp = clamp(gainComp, 0.5f, 2.0f);
+            processed *= gainComp;
+        }
+
+        // Apply SVF filter
+        if (filterMode != SVFilter::OFF) {
+            processed = filter.processMode(processed, filterMode, filterCutoff, filterQ, sampleRate);
+        }
+
+        // Apply level
+        processed *= level;
+
+        return processed;
+    }
+
+    /**
+     * Get stereo pan gains
+     */
+    void getPanGains(float& leftGain, float& rightGain) const {
+        // Equal-power pan law
+        leftGain = std::cos(pan * M_PI * 0.5f);
+        rightGain = std::sin(pan * M_PI * 0.5f);
+    }
 };
 
 /**
@@ -233,16 +320,22 @@ public:
         bumpFrequency = frequency;
         bumpGain = gain;
         bumpQ = q;
-        updateBumpFilter();
+        // Rate-limit filter coefficient updates (every 32 samples)
+        filterUpdateCounter++;
+        if (filterUpdateCounter >= 32) {
+            updateBumpFilter();
+            updateRolloffFilter();
+            filterUpdateCounter = 0;
+        }
     }
-    
+
     /**
      * Configure high-frequency rolloff
      */
     void setRolloff(float frequency, float resonance) {
         rolloffFreq = frequency;
         rolloffResonance = resonance;
-        updateRolloffFilter();
+        // Coefficients updated via rate-limited setHeadBump
     }
     
     /**
@@ -418,11 +511,18 @@ public:
         // STEP 10: Apply stereo decorrelation for channel separation
         processed = applyStereoDecorelation(processed, channel);
         
-        // CRITICAL FIX: Final safety clamp and NaN check
+        // DC blocking after nonlinear tape stages
+        {
+            float dcOut = processed - tapeDcBlockState[channel];
+            tapeDcBlockState[channel] = processed - dcOut * 0.9999f;
+            processed = dcOut;
+        }
+
+        // Final safety clamp and NaN check
         if (!std::isfinite(processed)) {
             processed = input * 0.7f; // Ultimate fallback to dry signal
         }
-        
+
         // Soft limiting to prevent clipping
         processed = std::tanh(processed * 0.8f) / 0.8f;
         
@@ -450,9 +550,9 @@ public:
                     // ===== CRITICAL FIX: Only read from active heads =====
                     if (playHeads[channel][0].delayTime > 0.0f) {
                         output = playHeads[channel][0].readFromTape(modulation);
-                        
+                        output = headDSP[channel][0].process(output, sampleRate);
+
                         // Apply subtle EQ for single-head character (brighter)
-                        static std::array<float, 2> singleHeadHighpass = {0.0f, 0.0f};
                         float hpCoeff = 0.95f; // Light high-pass
                         singleHeadHighpass[channel] += (output - singleHeadHighpass[channel]) * hpCoeff;
                         output = output - singleHeadHighpass[channel] * 0.1f; // Slight high boost
@@ -467,11 +567,13 @@ public:
                     
                     if (playHeads[channel][0].delayTime > 0.0f) {
                         head1 = playHeads[channel][0].readFromTape(modulation);
+                        head1 = headDSP[channel][0].process(head1, sampleRate);
                     }
                     if (playHeads[channel][1].delayTime > 0.0f) {
                         head2 = playHeads[channel][1].readFromTape(modulation * 1.03f); // Slightly different rate
+                        head2 = headDSP[channel][1].process(head2, sampleRate);
                     }
-                    
+
                     // ===== CRITICAL FIX: Proper stereo panning for dual heads =====
                     if (channel == 0) {
                         // Left channel: emphasize head 1, subtle head 2
@@ -494,14 +596,17 @@ public:
                     
                     if (playHeads[channel][0].delayTime > 0.0f) {
                         head1 = playHeads[channel][0].readFromTape(modulation);
+                        head1 = headDSP[channel][0].process(head1, sampleRate);
                     }
                     if (playHeads[channel][1].delayTime > 0.0f) {
                         head2 = playHeads[channel][1].readFromTape(modulation * 1.02f);
+                        head2 = headDSP[channel][1].process(head2, sampleRate);
                     }
                     if (playHeads[channel][2].delayTime > 0.0f) {
                         head3 = playHeads[channel][2].readFromTape(modulation * 1.05f);
+                        head3 = headDSP[channel][2].process(head3, sampleRate);
                     }
-                    
+
                     // Mix with weighted blend for richness
                     output = head1 * 0.5f + head2 * 0.3f + head3 * 0.2f;
                     
@@ -510,7 +615,6 @@ public:
                     output += harmonic;
                     
                     // Apply mid-frequency emphasis for warmth
-                    static std::array<float, 2> tripleHeadMidEQ = {0.0f, 0.0f};
                     float midCoeff = 0.85f;
                     tripleHeadMidEQ[channel] += (output - tripleHeadMidEQ[channel]) * midCoeff;
                     output = output + tripleHeadMidEQ[channel] * 0.1f; // Mid boost
@@ -524,15 +628,19 @@ public:
                     
                     if (playHeads[channel][0].delayTime > 0.0f) {
                         head1 = playHeads[channel][0].readFromTape(modulation);           // Main head
+                        head1 = headDSP[channel][0].process(head1, sampleRate);
                     }
                     if (playHeads[channel][1].delayTime > 0.0f) {
                         head2 = playHeads[channel][1].readFromTape(modulation * 1.015f);  // Slight detune
+                        head2 = headDSP[channel][1].process(head2, sampleRate);
                     }
                     if (playHeads[channel][2].delayTime > 0.0f) {
                         head3 = playHeads[channel][2].readFromTape(modulation * 1.03f);   // More detune
+                        head3 = headDSP[channel][2].process(head3, sampleRate);
                     }
                     if (playHeads[channel][3].delayTime > 0.0f) {
                         head4 = playHeads[channel][3].readFromTape(modulation * 1.045f);  // Maximum detune
+                        head4 = headDSP[channel][3].process(head4, sampleRate);
                     }
                     
                     // Progressive mixing for complex texture
@@ -543,8 +651,6 @@ public:
                     output += intermod;
                     
                     // Apply complex EQ curve for vintage warmth
-                    static std::array<float, 2> quadHeadLowpass = {0.0f, 0.0f};
-                    static std::array<float, 2> quadHeadMidboost = {0.0f, 0.0f};
                     
                     // Low-pass for warmth
                     float lpCoeff = 0.75f;
@@ -561,18 +667,6 @@ public:
                     output = std::tanh(output * 1.1f) / 1.1f;
                 }
                 break;
-        }
-        
-        // ===== CRITICAL FIX: Ensure proper head spacing and timing =====
-        // Set different delay times based on head configuration for clear sonic differences
-        if (headConfiguration >= 0 && headConfiguration <= 3) {
-            // Update head delay times to create distinct sonic characteristics
-            float baseDelay = 80.0f; // Base delay time in ms
-            
-            for (int head = 0; head < 4; head++) {
-                float headDelayTime = baseDelay + head * (30.0f + headConfiguration * 10.0f);
-                playHeads[channel][head].setDelayTime(headDelayTime);
-            }
         }
         
         return output;
@@ -720,19 +814,36 @@ public:
                 break;
         }
         
-        // Add some natural jitter/randomness to make it less predictable
-        float jitter = randomUniform(-0.05f, 0.05f) * (wowDepth + flutterDepth);
-        
-        // Combine wow and flutter with jitter
-        float totalMod = 1.0f + wowMod * wowDepth + flutterMod * flutterDepth + jitter;
-        
+        // 1/f noise component for wow (3 octaves of filtered noise)
+        float wowWhite = randomUniform(-1.0f, 1.0f);
+        pinkWowB0 = 0.99765f * pinkWowB0 + wowWhite * 0.0990460f;
+        pinkWowB1 = 0.96300f * pinkWowB1 + wowWhite * 0.2965164f;
+        pinkWowB2 = 0.57000f * pinkWowB2 + wowWhite * 1.0526913f;
+        float wowPinkNoise = (pinkWowB0 + pinkWowB1 + pinkWowB2) * 0.15f;
+
+        // Slow random walk for capstan irregularity
+        wowRandomWalk += randomUniform(-0.0001f, 0.0001f);
+        wowRandomWalk *= 0.9999f; // Decay toward zero
+        float wowWithNoise = wowMod * 0.7f + wowPinkNoise * 0.2f + wowRandomWalk * 0.1f;
+
+        // 1/f noise component for flutter
+        float flutterWhite = randomUniform(-1.0f, 1.0f);
+        pinkFlutterB0 = 0.99765f * pinkFlutterB0 + flutterWhite * 0.0990460f;
+        pinkFlutterB1 = 0.96300f * pinkFlutterB1 + flutterWhite * 0.2965164f;
+        pinkFlutterB2 = 0.57000f * pinkFlutterB2 + flutterWhite * 1.0526913f;
+        float flutterPinkNoise = (pinkFlutterB0 + pinkFlutterB1 + pinkFlutterB2) * 0.15f;
+        float flutterWithNoise = flutterMod * 0.7f + flutterPinkNoise * 0.3f;
+
+        // Combine wow and flutter with 1/f noise
+        float totalMod = 1.0f + wowWithNoise * wowDepth + flutterWithNoise * flutterDepth;
+
         // Ensure we don't go negative or too extreme
         return std::max(0.8f, std::min(totalMod, 1.2f));
     }
     
     /**
-     * Apply tape saturation to the signal
-     * 
+     * Apply tape saturation with asymmetric response and hysteresis
+     *
      * @param input Input sample
      * @return Saturated sample
      */
@@ -740,17 +851,21 @@ public:
         if (!tapeModeEnabled || saturationAmount < 0.001f) {
             return input;
         }
-        
-        // Drive amount (increases with saturation)
+
         float drive = 1.0f + saturationAmount * 5.0f;
-        float wetSignal = input * drive;
-        
-        // Soft clipping using tanh (hyperbolic tangent)
-        // More extreme at higher saturation values
-        wetSignal = std::tanh(wetSignal);
-        
-        // Blend between dry and saturated signal based on saturation amount
-        return input * (1.0f - saturationAmount) + wetSignal * saturationAmount;
+
+        // Frequency-dependent saturation: lows saturate more than highs (like real tape)
+        satLpState += (input - satLpState) * 0.1f; // ~500Hz split
+        float lowContent = satLpState;
+        float highContent = input - lowContent;
+        float saturated = std::tanh(lowContent * drive * 1.3f) + std::tanh(highContent * drive * 0.7f);
+
+        // Simple hysteresis: output depends on previous state (magnetic remnance)
+        float hysteresis = saturated + satHystState * 0.15f;
+        satHystState = saturated;
+
+        // Blend between dry and saturated signal
+        return input * (1.0f - saturationAmount) + hysteresis * saturationAmount;
     }
     
     /**
@@ -838,6 +953,64 @@ public:
     std::array<TapeHead, 2> recordHeads;           // Record heads for L/R channels
     std::array<std::array<TapeHead, 4>, 2> playHeads; // Up to 4 playback heads per channel
 
+    // Per-head DSP (pitch + filter per tap)
+    std::array<std::array<PerHeadDSP, 4>, 2> headDSP; // Per-head pitch/filter for L/R x 4 heads
+
+    /**
+     * Configure per-head DSP parameters
+     * @param channel 0=left, 1=right
+     * @param head Head index 0-3
+     * @param semitones Pitch shift in semitones (±24)
+     * @param cents Fine tune in cents (±99)
+     * @param filterMode SVFilter mode (OFF/LP/HP/BP/NOTCH)
+     * @param cutoff Filter cutoff frequency
+     * @param q Filter resonance (0-1)
+     * @param level Head level (0-1)
+     * @param pan Head pan (0=L, 0.5=C, 1=R)
+     */
+    void setHeadDSP(int channel, int head, float semitones, float cents,
+                    SVFilter::Mode filterMode, float cutoff, float q,
+                    float level, float pan) {
+        if (channel < 0 || channel > 1 || head < 0 || head > 3) return;
+        auto& dsp = headDSP[channel][head];
+        dsp.pitchSemitones = clamp(semitones, -24.0f, 24.0f);
+        dsp.pitchCents = clamp(cents, -99.0f, 99.0f);
+        dsp.filterMode = filterMode;
+        dsp.filterCutoff = clamp(cutoff, 20.0f, 20000.0f);
+        dsp.filterQ = clamp(q, 0.0f, 1.0f);
+        dsp.level = clamp(level, 0.0f, 1.0f);
+        dsp.pan = clamp(pan, 0.0f, 1.0f);
+    }
+
+    /**
+     * Process multi-head delay with per-head pitch shifting and filtering
+     * Returns stereo pair (left, right) for proper per-head panning
+     */
+    void processMultiHeadStereo(float input, int channel, float modulation,
+                                 float& outLeft, float& outRight) {
+        recordHeads[channel].writeToTape(input);
+
+        outLeft = 0.0f;
+        outRight = 0.0f;
+
+        int numHeads = headConfiguration + 1;
+        for (int h = 0; h < numHeads; h++) {
+            if (playHeads[channel][h].delayTime <= 0.0f) continue;
+
+            // Read raw delayed signal from this head
+            float headSignal = playHeads[channel][h].readFromTape(modulation);
+
+            // Apply per-head DSP (pitch shift + filter + level)
+            headSignal = headDSP[channel][h].process(headSignal, sampleRate);
+
+            // Apply per-head panning
+            float panL, panR;
+            headDSP[channel][h].getPanGains(panL, panR);
+            outLeft += headSignal * panL;
+            outRight += headSignal * panR;
+        }
+    }
+
 private:
     float sampleRate;
     std::atomic<bool> tapeModeEnabled;
@@ -882,6 +1055,27 @@ private:
     // Aging and instability state
     std::array<float, 2> agingLowpass = {0.0f, 0.0f};
     std::array<float, 2> instabilityPhase = {0.0f, 0.0f};
+
+    // DC blocker state per channel (one-pole highpass ~5Hz)
+    std::array<float, 2> tapeDcBlockState = {0.0f, 0.0f};
+
+    // Tape saturation state
+    float satLpState = 0.0f;   // Low-pass state for frequency-dependent saturation
+    float satHystState = 0.0f; // Hysteresis state for magnetic remnance
+
+    // 1/f noise state for wow/flutter realism
+    float pinkWowB0 = 0.0f, pinkWowB1 = 0.0f, pinkWowB2 = 0.0f;
+    float pinkFlutterB0 = 0.0f, pinkFlutterB1 = 0.0f, pinkFlutterB2 = 0.0f;
+    float wowRandomWalk = 0.0f; // Slow random walk for capstan irregularity
+
+    // Per-head EQ filter state (per-channel, NOT static to avoid cross-instance contamination)
+    std::array<float, 2> singleHeadHighpass = {0.0f, 0.0f};
+    std::array<float, 2> tripleHeadMidEQ = {0.0f, 0.0f};
+    std::array<float, 2> quadHeadLowpass = {0.0f, 0.0f};
+    std::array<float, 2> quadHeadMidboost = {0.0f, 0.0f};
+
+    // Filter coefficient rate-limiting
+    int filterUpdateCounter = 0;
     
     // Pink noise filter
     struct PinkNoiseFilter {

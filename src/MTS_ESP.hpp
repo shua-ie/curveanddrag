@@ -293,8 +293,8 @@ private:
      * @return true if all required functions are available
      */
     bool validateFunctionPointers() {
-        if (!MTS_RegisterClient || !MTS_DeregisterClient || !MTS_HasMaster || 
-            !MTS_NoteToFrequency || !MTS_ShouldFilterNote) {
+        if (!MTS_RegisterClient || !MTS_DeregisterClient || !MTS_HasMaster ||
+            !MTS_NoteToFrequency || !MTS_RetuningInSemitones || !MTS_ShouldFilterNote) {
             DEBUG("MTS-ESP: Failed to load required function pointers");
             return false;
         }

@@ -114,6 +114,7 @@ public:
         // Add the octave (2/1 ratio = 1200 cents)
         if (!cents.empty()) {
             cents.push_back(1200.0);
+            customScaleLoaded = true;
             return true;
         }
 
@@ -128,8 +129,8 @@ public:
     void setDefaultScale() {
         description = "12-Tone Equal Temperament";
         cents.clear();
-        
-        // Generate 12-TET scale (12 equal divisions of the octave)
+        customScaleLoaded = false;
+
         for (int i = 1; i <= 12; i++) {
             cents.push_back(i * 100.0);
         }
@@ -193,6 +194,13 @@ public:
     }
 
     /**
+     * Check if a custom Scala file has been loaded (not the default 12-TET)
+     */
+    bool isLoaded() const {
+        return customScaleLoaded;
+    }
+
+    /**
      * Get the description of the currently loaded scale
      */
     std::string getDescription() const {
@@ -202,6 +210,7 @@ public:
 private:
     std::string description;
     std::vector<double> cents;
+    bool customScaleLoaded = false;
 };
 
 } // namespace CurveAndDrag

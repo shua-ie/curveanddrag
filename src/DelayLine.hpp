@@ -7,41 +7,29 @@ namespace CurveAndDrag {
 
 /**
  * DelayLine - Class for implementing a delay line with interpolation
- * 
- * Features smooth delay time changes, feedback, and cross-feedback options
+ *
+ * Features smooth delay time changes, feedback, and cross-feedback options.
+ * Supports both internal feedback (classic) and external feedback processing
+ * (for pitch-in-feedback-loop / shimmer architecture).
  */
 class DelayLine {
 public:
     DelayLine() {
-        // Initialize with default values
         sampleRate = 44100.0f;
-        maxDelayTimeMs = 2000.0f;  // 2 seconds maximum delay
-        delayTimeMs = 100.0f;      // Default 100ms
-        feedback = 0.5f;           // Default 50% feedback
-        dryWet = 0.5f;             // Default 50/50 dry/wet
-        
-        // Initialize buffers
+        maxDelayTimeMs = 2000.0f;
+        delayTimeMs = 100.0f;
+        feedback = 0.5f;
+        dryWet = 0.5f;
         reset();
     }
 
-    /**
-     * Reset all internal buffer state
-     */
     void reset() {
-        // Calculate buffer size based on max delay time
-        int bufferSize = static_cast<int>(std::ceil((maxDelayTimeMs / 1000.0f) * sampleRate)) + 2;
+        int bufferSize = static_cast<int>(std::ceil((maxDelayTimeMs / 1000.0f) * sampleRate)) + 4;
         buffer.resize(bufferSize, 0.0f);
         writeIndex = 0;
-        
-        // Calculate read position based on current delay time
         delayInSamples = (delayTimeMs / 1000.0f) * sampleRate;
     }
 
-    /**
-     * Configure the delay line
-     * 
-     * @param newSampleRate Audio sample rate
-     */
     void configure(float newSampleRate) {
         if (sampleRate != newSampleRate) {
             sampleRate = newSampleRate;
@@ -49,74 +37,93 @@ public:
         }
     }
 
-    /**
-     * Set the delay time in milliseconds
-     * 
-     * @param newDelayTimeMs Delay time in milliseconds (1-2000 ms)
-     */
     void setDelayTime(float newDelayTimeMs) {
-        // Constrain to valid range
         delayTimeMs = rack::math::clamp(newDelayTimeMs, 1.0f, maxDelayTimeMs);
         delayInSamples = (delayTimeMs / 1000.0f) * sampleRate;
     }
 
-    /**
-     * Set the feedback amount
-     * 
-     * @param newFeedback Feedback amount (0.0-1.1)
-     */
     void setFeedback(float newFeedback) {
-        // Allow feedback up to 110%, but don't exceed that to prevent runaway
         feedback = rack::math::clamp(newFeedback, 0.0f, 1.1f);
     }
 
-    /**
-     * Set the dry/wet mix
-     * 
-     * @param newDryWet Dry/wet mix amount (0.0-1.0)
-     */
     void setDryWet(float newDryWet) {
         dryWet = rack::math::clamp(newDryWet, 0.0f, 1.0f);
     }
 
+    float getFeedback() const { return feedback; }
+    float getDryWet() const { return dryWet; }
+
     /**
-     * Process a single audio sample through the delay line
-     * 
-     * @param input Input audio sample
-     * @param externalFeedback Optional external feedback signal (for cross-feedback)
-     * @return Processed output sample
+     * Classic process: read, apply internal feedback, write, mix dry/wet.
+     * Use this when pitch is OUTSIDE the feedback loop (pre-loop mode).
      */
     float process(float input, float externalFeedback = 0.0f) {
-        // Read from delay line with linear interpolation
         float delayedSample = read();
-        
-        // Apply feedback with optional external signal
         float feedbackSignal = feedback * delayedSample + externalFeedback;
-        
-        // Write to delay line
         write(input + feedbackSignal);
-        
-        // Mix dry and wet signals
         return input * (1.0f - dryWet) + delayedSample * dryWet;
+    }
+
+    // === Separated feedback path for pitch-in-loop architecture ===
+
+    /**
+     * Read the current delayed sample (does NOT advance write pointer).
+     * Use with writeWithFeedback() for external feedback processing.
+     */
+    float readDelayed() {
+        return read();
+    }
+
+    /**
+     * Write input + externally-processed feedback signal.
+     * Call after readDelayed() + external processing (pitch shift, filter, etc.)
+     *
+     * @param input Fresh input sample
+     * @param processedFeedback The delayed signal after external processing * feedback amount
+     */
+    void writeWithFeedback(float input, float processedFeedback) {
+        write(input + processedFeedback);
     }
 
     /**
      * Get the delayed signal only (no dry/wet mixing)
-     * 
-     * @return The current delayed output sample
      */
     float getDelayedSignal() {
         return read();
     }
 
     /**
-     * Get the wet signal only (delayed signal with feedback)
-     * 
-     * @return The current wet output sample
+     * Get the wet signal only
      */
     float getWetSignal() {
-        return read(); // Return pure delayed signal without dry/wet mixing
+        return read();
     }
+
+    /**
+     * Get current buffer contents for freeze mode - captures the buffer state
+     */
+    void captureBuffer(std::vector<float>& dest) const {
+        dest = buffer;
+    }
+
+    /**
+     * Restore buffer from captured state (for freeze release)
+     */
+    void restoreBuffer(const std::vector<float>& src) {
+        if (src.size() == buffer.size()) {
+            buffer = src;
+        }
+    }
+
+    /**
+     * Get buffer size for freeze operations
+     */
+    int getBufferSize() const { return static_cast<int>(buffer.size()); }
+
+    /**
+     * Get current write index
+     */
+    int getWriteIndex() const { return writeIndex; }
 
 private:
     float sampleRate;
@@ -125,40 +132,32 @@ private:
     float delayInSamples;
     float feedback;
     float dryWet;
-    
+
     std::vector<float> buffer;
     int writeIndex;
 
-    /**
-     * Read from the delay line with linear interpolation
-     * 
-     * @return Interpolated sample from delay line
-     */
     float read() {
-        // Calculate read position
         float readPos = writeIndex - delayInSamples;
         if (readPos < 0) {
             readPos += buffer.size();
         }
-        
-        // Get integer position and fraction for interpolation
+
         int readPos_i = static_cast<int>(readPos);
         float frac = readPos - readPos_i;
-        
-        // Get samples for interpolation
-        int nextPos = (readPos_i + 1) % buffer.size();
-        float sample1 = buffer[readPos_i];
-        float sample2 = buffer[nextPos];
-        
-        // Linear interpolation
-        return sample1 + frac * (sample2 - sample1);
+        int bufSize = static_cast<int>(buffer.size());
+
+        float p0 = buffer[(readPos_i - 1 + bufSize) % bufSize];
+        float p1 = buffer[readPos_i];
+        float p2 = buffer[(readPos_i + 1) % bufSize];
+        float p3 = buffer[(readPos_i + 2) % bufSize];
+
+        float c0 = p1;
+        float c1 = 0.5f * (p2 - p0);
+        float c2 = p0 - 2.5f * p1 + 2.0f * p2 - 0.5f * p3;
+        float c3 = 0.5f * (p3 - p0) + 1.5f * (p1 - p2);
+        return ((c3 * frac + c2) * frac + c1) * frac + c0;
     }
 
-    /**
-     * Write a sample to the delay line
-     * 
-     * @param sample Audio sample to write
-     */
     void write(float sample) {
         buffer[writeIndex] = sample;
         writeIndex = (writeIndex + 1) % buffer.size();
