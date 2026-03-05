@@ -42,16 +42,26 @@ struct PerHeadDSP {
     float filterCutoff = 8000.0f;
     float filterQ = 0.0f;
 
-    // Pitch shifting state (simple varispeed for tape heads)
+    // Pitch shifting state — 32768-sample buffer with cubic Hermite interpolation
+    static constexpr int PITCH_BUF_SIZE = 32768;
+    static constexpr int PITCH_BUF_MASK = PITCH_BUF_SIZE - 1;
     float readPhase = 0.0f;
-    std::array<float, 4096> pitchBuffer = {};
+    std::array<float, PITCH_BUF_SIZE> pitchBuffer = {};
     int pitchWritePos = 0;
+
+    // Anti-alias one-pole LP state for pitch-up
+    float aaLpState = 0.0f;
+
+    // Parameter smoothing
+    float smoothedRatio = 1.0f;
 
     void reset() {
         filter.reset();
         readPhase = 0.0f;
         pitchBuffer.fill(0.0f);
         pitchWritePos = 0;
+        aaLpState = 0.0f;
+        smoothedRatio = 1.0f;
     }
 
     /**
@@ -63,25 +73,46 @@ struct PerHeadDSP {
         // Apply pitch shifting if non-zero
         float totalCents = pitchSemitones * 100.0f + pitchCents;
         if (std::abs(totalCents) > 1.0f) {
-            float ratio = std::pow(2.0f, totalCents / 1200.0f);
-            ratio = clamp(ratio, 0.25f, 4.0f);
+            float targetRatio = std::pow(2.0f, totalCents / 1200.0f);
+            targetRatio = clamp(targetRatio, 0.25f, 4.0f);
+
+            // Smooth ratio changes to prevent zipper noise (10ms ramp)
+            float smoothCoeff = 1.0f - std::exp(-1.0f / (sampleRate * 0.01f));
+            smoothedRatio += (targetRatio - smoothedRatio) * smoothCoeff;
+
+            // Anti-alias pre-filter for pitch-up (one-pole LP)
+            float writeInput = input;
+            if (smoothedRatio > 1.01f) {
+                float cutoff = 1.0f / smoothedRatio;
+                aaLpState += (writeInput - aaLpState) * cutoff;
+                writeInput = aaLpState;
+            }
 
             // Write to pitch buffer
-            pitchBuffer[pitchWritePos] = input;
-            pitchWritePos = (pitchWritePos + 1) & 4095;
+            pitchBuffer[pitchWritePos] = writeInput;
+            pitchWritePos = (pitchWritePos + 1) & PITCH_BUF_MASK;
 
-            // Read at shifted rate with linear interpolation
-            readPhase += ratio;
-            if (readPhase >= 4096.0f) readPhase -= 4096.0f;
-            if (readPhase < 0.0f) readPhase += 4096.0f;
+            // Read at shifted rate with cubic Hermite interpolation
+            readPhase += smoothedRatio;
+            if (readPhase >= static_cast<float>(PITCH_BUF_SIZE)) readPhase -= static_cast<float>(PITCH_BUF_SIZE);
+            if (readPhase < 0.0f) readPhase += static_cast<float>(PITCH_BUF_SIZE);
 
-            int idx0 = static_cast<int>(readPhase) & 4095;
-            int idx1 = (idx0 + 1) & 4095;
+            int idx1 = static_cast<int>(readPhase) & PITCH_BUF_MASK;
             float frac = readPhase - std::floor(readPhase);
-            processed = pitchBuffer[idx0] * (1.0f - frac) + pitchBuffer[idx1] * frac;
+            float p0 = pitchBuffer[(idx1 - 1 + PITCH_BUF_SIZE) & PITCH_BUF_MASK];
+            float p1 = pitchBuffer[idx1];
+            float p2 = pitchBuffer[(idx1 + 1) & PITCH_BUF_MASK];
+            float p3 = pitchBuffer[(idx1 + 2) & PITCH_BUF_MASK];
+
+            // Hermite interpolation
+            float c0 = p1;
+            float c1 = 0.5f * (p2 - p0);
+            float c2 = p0 - 2.5f * p1 + 2.0f * p2 - 0.5f * p3;
+            float c3 = 0.5f * (p3 - p0) + 1.5f * (p1 - p2);
+            processed = ((c3 * frac + c2) * frac + c1) * frac + c0;
 
             // Gain compensation
-            float gainComp = 1.0f / std::sqrt(std::abs(ratio));
+            float gainComp = 1.0f / std::sqrt(std::abs(smoothedRatio));
             gainComp = clamp(gainComp, 0.5f, 2.0f);
             processed *= gainComp;
         }
@@ -131,36 +162,29 @@ struct TapeHead {
     }
     
     float readFromTape(float modulation = 1.0f) {
-        // CRITICAL FIX: Ensure buffer is not empty and delay time is set
         if (buffer.empty() || delayTime <= 0.0f) {
             return 0.0f;
         }
-        
-        // ===== CRITICAL FIX: Apply modulation directly to delay time =====
-        // This ensures wow and flutter actually modulate the delay time
-        float modulatedDelayTime = delayTime * modulation; // Apply modulation to delay time
-        
-        // Calculate read position with modulated delay time
+
+        float modulatedDelayTime = delayTime * modulation;
         float delayInSamples = modulatedDelayTime * sampleRate / 1000.0f;
-        int delaySamples = static_cast<int>(delayInSamples);
-        float fraction = delayInSamples - delaySamples;
-        
-        // CRITICAL FIX: Ensure we don't read beyond buffer boundaries
-        delaySamples = clamp(delaySamples, 1, static_cast<int>(buffer.size()) - 2);
-        
-        // Calculate read positions with bounds checking
-        int pos1 = (writePos - delaySamples - 1 + buffer.size()) % buffer.size();
-        int pos2 = (writePos - delaySamples + buffer.size()) % buffer.size();
-        
-        // CRITICAL FIX: Ensure positions are valid
-        pos1 = clamp(pos1, 0, static_cast<int>(buffer.size()) - 1);
-        pos2 = clamp(pos2, 0, static_cast<int>(buffer.size()) - 1);
-        
-        // Linear interpolation for smooth delay modulation
-        float sample1 = buffer[pos1];
-        float sample2 = buffer[pos2];
-        
-        return sample1 * (1.0f - fraction) + sample2 * fraction;
+        delayInSamples = clamp(delayInSamples, 1.0f, static_cast<float>(buffer.size()) - 4.0f);
+
+        int bufSize = static_cast<int>(buffer.size());
+        int idx = static_cast<int>(delayInSamples);
+        float frac = delayInSamples - static_cast<float>(idx);
+
+        // 4-point cubic Hermite interpolation
+        float p0 = buffer[(writePos - idx - 1 + bufSize) % bufSize];
+        float p1 = buffer[(writePos - idx + bufSize) % bufSize];
+        float p2 = buffer[(writePos - idx + 1 + bufSize) % bufSize];
+        float p3 = buffer[(writePos - idx + 2 + bufSize) % bufSize];
+
+        float c0 = p1;
+        float c1 = 0.5f * (p2 - p0);
+        float c2 = p0 - 2.5f * p1 + 2.0f * p2 - 0.5f * p3;
+        float c3 = 0.5f * (p3 - p0) + 1.5f * (p1 - p2);
+        return ((c3 * frac + c2) * frac + c1) * frac + c0;
     }
     
     void setDelayTime(float timeMs) {
@@ -523,8 +547,10 @@ public:
             processed = input * 0.7f; // Ultimate fallback to dry signal
         }
 
-        // Soft limiting to prevent clipping
-        processed = std::tanh(processed * 0.8f) / 0.8f;
+        // Gentle soft limiting — preserves dynamics
+        if (std::abs(processed) > 1.0f) {
+            processed = std::tanh(processed);
+        }
         
         return processed;
     }
@@ -852,16 +878,27 @@ public:
             return input;
         }
 
-        float drive = 1.0f + saturationAmount * 5.0f;
+        // Logarithmic drive curve (like real tape)
+        float drive = std::exp(saturationAmount * 2.0f);
 
-        // Frequency-dependent saturation: lows saturate more than highs (like real tape)
-        satLpState += (input - satLpState) * 0.1f; // ~500Hz split
+        // Two-band frequency-dependent saturation
+        // Low band (~300Hz split) saturates harder, high band stays cleaner
+        float lpCoeff = 300.0f / sampleRate * 2.0f * static_cast<float>(M_PI);
+        lpCoeff = clamp(lpCoeff, 0.001f, 0.5f);
+        satLpState += (input - satLpState) * lpCoeff;
         float lowContent = satLpState;
         float highContent = input - lowContent;
-        float saturated = std::tanh(lowContent * drive * 1.3f) + std::tanh(highContent * drive * 0.7f);
 
-        // Simple hysteresis: output depends on previous state (magnetic remnance)
-        float hysteresis = saturated + satHystState * 0.15f;
+        // Asymmetric saturation (tape saturates differently for +/-)
+        float satLow = std::tanh(lowContent * drive * 1.5f);
+        if (lowContent > 0.0f) satLow *= 1.02f; // Subtle asymmetry
+        float satHigh = std::tanh(highContent * drive * 0.6f);
+
+        float saturated = satLow + satHigh;
+
+        // Magnetic hysteresis: current output depends on previous state
+        float hystCoeff = 0.2f * saturationAmount;
+        float hysteresis = saturated + (satHystState - saturated) * hystCoeff;
         satHystState = saturated;
 
         // Blend between dry and saturated signal
@@ -879,18 +916,12 @@ public:
         if (!tapeModeEnabled) {
             return input;
         }
-        
-        // Apply pre-emphasis (boosts highs before processing)
-        float preEmph = preEmphasisFilter[channel].process(input);
-        
+
         // Apply bass bump (centered around delay resonance frequency)
-        float bumped = bumpFilter[channel].process(preEmph);
-        
+        float bumped = bumpFilter[channel].process(input);
+
         // Apply high-frequency rolloff
-        float rolled = rolloffFilter[channel].process(bumped);
-        
-        // Apply de-emphasis (cuts highs after processing)
-        return deEmphasisFilter[channel].process(rolled);
+        return rolloffFilter[channel].process(bumped);
     }
     
     /**
@@ -903,12 +934,12 @@ public:
             return 0.0f;
         }
         
-        // ===== CRITICAL FIX: Completely Rewritten Noise Generation =====
-        // Apply cubic exponential scaling but with higher base level for audibility
-        float scaledNoise = noiseAmount * noiseAmount * 0.08f; // FINAL FIX: Boosted from 0.02f to 0.08f for 8% max level
-        
+        // Logarithmic scaling for natural noise level control
+        // At full amount: ~25% signal level (realistic tape hiss)
+        float scaledNoise = noiseAmount * 0.25f;
+
         if (scaledNoise < 0.0001f) {
-            return 0.0f; // Below audible threshold
+            return 0.0f;
         }
         
         // Generate high-quality pink noise
@@ -920,31 +951,31 @@ public:
         // 1. Main tape hiss (pink noise)
         float tapeHiss = pinkNoise * scaledNoise;
         
-        // 2. 60Hz hum (very subtle)
+        // 2. 60Hz hum with harmonics (120Hz, 180Hz)
         humPhase += humFrequency / sampleRate;
         if (humPhase >= 1.0f) humPhase -= 1.0f;
-        float hum = std::sin(2.0f * M_PI * humPhase) * scaledNoise * 0.1f; // 10% of main noise
+        float hum = (std::sin(2.0f * M_PI * humPhase)
+                    + 0.5f * std::sin(4.0f * M_PI * humPhase)
+                    + 0.25f * std::sin(6.0f * M_PI * humPhase)) * scaledNoise * 0.1f;
         
-        // 3. High-frequency tape artifacts (very rare)
-        static int artifactCounter = 0;
+        // 3. High-frequency tape artifacts (occasional)
         float artifacts = 0.0f;
-        artifactCounter++;
-        if (artifactCounter > 44100 && randomUniform(0.0f, 1.0f) < scaledNoise * 0.1f) {
-            artifacts = randomUniform(-1.0f, 1.0f) * scaledNoise * 0.3f;
-            artifactCounter = 0;
+        noiseArtifactCounter++;
+        if (noiseArtifactCounter > 22050 && randomUniform(0.0f, 1.0f) < scaledNoise * 0.2f) {
+            artifacts = randomUniform(-1.0f, 1.0f) * scaledNoise * 0.5f;
+            noiseArtifactCounter = 0;
         }
         
         // 4. Low-frequency rumble (DC offset simulation)
-        static float rumblePhase = 0.0f;
-        rumblePhase += 1.7f / sampleRate; // Very low frequency
-        if (rumblePhase >= 1.0f) rumblePhase -= 1.0f;
-        float rumble = std::sin(2.0f * M_PI * rumblePhase) * scaledNoise * 0.05f;
+        noiseRumblePhase += 1.7f / sampleRate; // Very low frequency
+        if (noiseRumblePhase >= 1.0f) noiseRumblePhase -= 1.0f;
+        float rumble = std::sin(2.0f * M_PI * noiseRumblePhase) * scaledNoise * 0.05f;
         
         // ===== CRITICAL FIX: Combine all noise components additively =====
         float totalNoise = tapeHiss + hum + artifacts + rumble;
         
-        // Apply final limiting to prevent noise spikes
-        totalNoise = clamp(totalNoise, -0.01f, 0.01f); // Hard limit to 1% signal
+        // Soft-limit noise spikes
+        totalNoise = std::tanh(totalNoise * 4.0f) * 0.25f;
         
         return totalNoise;
     }
@@ -1073,6 +1104,10 @@ private:
     std::array<float, 2> tripleHeadMidEQ = {0.0f, 0.0f};
     std::array<float, 2> quadHeadLowpass = {0.0f, 0.0f};
     std::array<float, 2> quadHeadMidboost = {0.0f, 0.0f};
+
+    // Noise state (member variables, not static)
+    int noiseArtifactCounter = 0;
+    float noiseRumblePhase = 0.0f;
 
     // Filter coefficient rate-limiting
     int filterUpdateCounter = 0;

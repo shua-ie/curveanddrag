@@ -66,7 +66,7 @@ x86_64-w64-mingw32-g++ \
 # Check build result
 if [ -f plugin.dll ]; then
     echo "✅ CurveAndDrag v1.0 Windows build successful: plugin.dll ($(du -h plugin.dll | cut -f1))"
-
+    
     # Create distribution package
     mkdir -p dist-windows
     cp plugin.dll dist-windows/
@@ -74,7 +74,7 @@ if [ -f plugin.dll ]; then
     [ -d res ] && cp -r res dist-windows/
     [ -f LICENSE ] && cp LICENSE dist-windows/
     [ -f README.md ] && cp README.md dist-windows/
-
+    
     # Create vcvplugin package (tar.zst format with top-level folder)
     PLUGIN_DIR="CurveAndDrag"
     rm -rf "$PLUGIN_DIR"
@@ -82,7 +82,7 @@ if [ -f plugin.dll ]; then
     cp -r dist-windows/* "$PLUGIN_DIR/"
     tar -cf - "$PLUGIN_DIR" | zstd -o "CurveAndDrag-2.0.0-win-x64.vcvplugin"
     rm -rf "$PLUGIN_DIR"
-
+    
     echo "📦 CurveAndDrag v1.0 Release Package Created: CurveAndDrag-2.0.0-win-x64.vcvplugin"
     ls -la CurveAndDrag-2.0.0-win-x64.vcvplugin
     echo ""
@@ -92,4 +92,4 @@ if [ -f plugin.dll ]; then
 else
     echo "❌ CurveAndDrag v1.0 Windows build failed"
     exit 1
-fi
+fi 

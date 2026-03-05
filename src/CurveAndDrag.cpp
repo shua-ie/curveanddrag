@@ -9,7 +9,6 @@
 #include "CurveAndDrag.hpp"
 #include "plugin.hpp"
 #include "CurveAndDragWidget.hpp"
-#include "math_constants.h"
 #include <rack.hpp>
 #include <algorithm>
 #include <cmath>
@@ -710,8 +709,9 @@ void CurveAndDragModule::process(const ProcessArgs& args) {
             rightDelay.writeWithFeedback(rightProcessed, rightFBPitched * feedbackR);
         }
 
-        leftDelayed = leftDelayedRaw;
-        rightDelayed = rightDelayedRaw;
+        // Use pitch-shifted signals for output so shimmer effect is audible
+        leftDelayed = leftFBPitched;
+        rightDelayed = rightFBPitched;
     }
 
     // === Cross-Feedback (BEFORE Tape Processing) ===
