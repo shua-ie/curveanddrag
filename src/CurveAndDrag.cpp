@@ -259,8 +259,10 @@ void CurveAndDragModule::onReset() {
     h910DriftPhaseL = 0.0f;
     h910DriftPhaseR = 0.0f;
 
-    antiAliasFilterL.reset();
-    antiAliasFilterR.reset();
+    antiAliasFilterL1.reset();
+    antiAliasFilterR1.reset();
+    antiAliasFilterL2.reset();
+    antiAliasFilterR2.reset();
     lastAntiAliasRatio = 0.0f;
     bbdLpfL = 0.0f;
     bbdLpfR = 0.0f;
