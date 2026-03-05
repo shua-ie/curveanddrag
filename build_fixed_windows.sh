@@ -45,7 +45,7 @@ echo "Using targeted SIMD flags: $SIMD_FLAGS"
 
 # ===== COMPILATION WITH TARGETED SIMD CONTROL =====
 x86_64-w64-mingw32-g++ \
-    -std=c++11 \
+    -std=c++17 \
     -I./src \
     -I../Rack-WIN-SDK/include \
     -I../Rack-WIN-SDK/dep/include \
