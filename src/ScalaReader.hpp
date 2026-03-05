@@ -111,10 +111,11 @@ public:
 
         file.close();
 
-        // Add the octave (2/1 ratio = 1200 cents)
+        // Validate: the last entry should be the period (octave)
+        // Don't append 1200 — the Scala format already includes the period as the last entry
         if (!cents.empty()) {
-            cents.push_back(1200.0);
             customScaleLoaded = true;
+            scaleFilePath = path;
             return true;
         }
 
@@ -142,8 +143,9 @@ public:
     void set19EDO() {
         description = "19-Tone Equal Division of the Octave";
         cents.clear();
-        
-        // Generate 19-EDO scale
+        customScaleLoaded = true;
+
+        // Generate 19-EDO scale (last entry is the period = 1200 cents)
         double step = 1200.0 / 19.0;
         for (int i = 1; i <= 19; i++) {
             cents.push_back(i * step);
@@ -207,10 +209,15 @@ public:
         return description;
     }
 
+    std::string getScaleFilePath() const {
+        return scaleFilePath;
+    }
+
 private:
     std::string description;
     std::vector<double> cents;
     bool customScaleLoaded = false;
+    std::string scaleFilePath;
 };
 
 } // namespace CurveAndDrag

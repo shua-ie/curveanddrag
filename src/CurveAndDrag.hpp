@@ -430,6 +430,8 @@ private:
 
     DCBlocker2 dcBlockerL;
     DCBlocker2 dcBlockerR;
+    DCBlocker2 fbDcBlockerL; // Feedback path DC blocker (shimmer mode)
+    DCBlocker2 fbDcBlockerR;
 
     // Display update state
     float lastLeftSubdiv = -1.0f;

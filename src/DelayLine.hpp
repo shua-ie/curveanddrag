@@ -125,6 +125,7 @@ public:
      */
     int getWriteIndex() const { return writeIndex; }
 
+    float getLastReadValue() const { return lastReadValue; }
 private:
     float sampleRate;
     float maxDelayTimeMs;
@@ -135,6 +136,8 @@ private:
 
     std::vector<float> buffer;
     int writeIndex;
+
+    float lastReadValue = 0.0f;
 
     float read() {
         float readPos = writeIndex - delayInSamples;
@@ -155,7 +158,8 @@ private:
         float c1 = 0.5f * (p2 - p0);
         float c2 = p0 - 2.5f * p1 + 2.0f * p2 - 0.5f * p3;
         float c3 = 0.5f * (p3 - p0) + 1.5f * (p1 - p2);
-        return ((c3 * frac + c2) * frac + c1) * frac + c0;
+        lastReadValue = ((c3 * frac + c2) * frac + c1) * frac + c0;
+        return lastReadValue;
     }
 
     void write(float sample) {

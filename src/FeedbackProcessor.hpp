@@ -256,16 +256,9 @@ public:
         // 4. Tilt EQ (progressive darkening or brightening per repeat)
         if (std::abs(tiltAmount) > 0.01f) {
             float tiltFreq = 1000.0f;
-            // Use the LP filter output vs HP filter output ratio to implement tilt
             auto tiltOut = ch.tiltFilter.process(out, tiltFreq, 0.3f, sampleRate);
-            float darkBright = tiltAmount; // -1 to +1
-            if (darkBright < 0.0f) {
-                // Dark: boost lows, cut highs
-                out = tiltOut.lp * (1.0f - darkBright) + tiltOut.hp * (1.0f + darkBright);
-            } else {
-                // Bright: cut lows, boost highs
-                out = tiltOut.lp * (1.0f - darkBright) + tiltOut.hp * (1.0f + darkBright);
-            }
+            // tiltAmount: -1 = dark (boost LP, cut HP), +1 = bright (cut LP, boost HP)
+            out = tiltOut.lp * (1.0f - tiltAmount) + tiltOut.hp * (1.0f + tiltAmount);
         }
 
         // 5. Saturation (tanh soft clip with variable drive)
@@ -287,8 +280,8 @@ public:
             }
         }
 
-        // 7. Ducking (reduce feedback when input is present)
-        if (duckAmount > 0.001f) {
+        // 7. Ducking (reduce feedback when input is present) — skip during freeze
+        if (duckAmount > 0.001f && !freezeEnabled) {
             float duckAttack = 1.0f - std::exp(-1.0f / (sampleRate * 0.005f)); // 5ms attack
             float duckReleaseCoeff = 1.0f - std::exp(-1.0f / (sampleRate * duckRelease));
             float env = ch.duckEnvelope.process(inputLevel, duckAttack, duckReleaseCoeff);

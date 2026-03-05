@@ -236,7 +236,7 @@ private:
     MTS_GetScaleName_t MTS_GetScaleName;
     
     // State variables
-    bool libMtsLoaded;
+    std::atomic<bool> libMtsLoaded;
     std::atomic<bool> mtsConnected;
     mutable std::mutex mtsMutex;
     std::string mtsTuningName;

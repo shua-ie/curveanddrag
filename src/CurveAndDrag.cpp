@@ -268,6 +268,8 @@ void CurveAndDragModule::onReset() {
 
     dcBlockerL.reset();
     dcBlockerR.reset();
+    fbDcBlockerL.reset();
+    fbDcBlockerR.reset();
 
     lastLeftSubdiv = -1.0f;
     lastRightSubdiv = -1.0f;
@@ -299,6 +301,7 @@ void CurveAndDragModule::onReset() {
     inputLevelR = 0.0f;
     pitchPlacement = PITCH_PRE_LOOP;
     ditherSeed = 12345;
+    scalaReader.setDefaultScale();
 }
 
 void CurveAndDragModule::onSampleRateChange() {
@@ -309,6 +312,18 @@ void CurveAndDragModule::onSampleRateChange() {
     feedbackProc.configure(sampleRate);
     bbdCompanderCompress.configure(sampleRate);
     bbdCompanderExpand.configure(sampleRate);
+
+    // Reset pitch shifter buffers (content was recorded at old sample rate)
+    phaseLockShifterL.reset();
+    phaseLockShifterR.reset();
+    spectralShifterL.reset();
+    spectralShifterR.reset();
+    leftBBDBuffer.fill(0.0f);
+    rightBBDBuffer.fill(0.0f);
+    leftH910Buffer.fill(0.0f);
+    rightH910Buffer.fill(0.0f);
+    leftVarBuffer.fill(0.0f);
+    rightVarBuffer.fill(0.0f);
 }
 
 // ===== CV INPUT PROCESSING =====
@@ -540,10 +555,10 @@ void CurveAndDragModule::process(const ProcessArgs& args) {
     // Effective sample rate for DSP calculations
     float effectiveSampleRate = args.sampleRate;
 
-    // Track input level for ducking
-    float smoothCoeff = 0.01f;
-    inputLevelL += (std::abs(leftInput) - inputLevelL) * smoothCoeff;
-    inputLevelR += (std::abs(rightInput) - inputLevelR) * smoothCoeff;
+    // Track input level for ducking (sample-rate independent)
+    float levelSmooth = 1.0f - std::exp(-1.0f / (effectiveSampleRate * 0.003f));
+    inputLevelL += (std::abs(leftInput) - inputLevelL) * levelSmooth;
+    inputLevelR += (std::abs(rightInput) - inputLevelR) * levelSmooth;
 
     // === Pitch envelope follower ===
     float pitchEnvAmount = getClampedParam(PITCH_ENV_AMOUNT_PARAM, PITCH_ENV_CV_INPUT, -1.0f, 1.0f);
@@ -583,8 +598,11 @@ void CurveAndDragModule::process(const ProcessArgs& args) {
         rightProcessed = dcBlockerR.process(rightProcessed);
 
         // Process through delay lines (internal feedback)
-        leftDelayed = leftDelay.process(leftProcessed);
-        rightDelayed = rightDelay.process(rightProcessed);
+        // process() handles feedback and write internally; use lastReadValue for raw wet signal
+        leftDelay.process(leftProcessed);
+        rightDelay.process(rightProcessed);
+        leftDelayed = leftDelay.getLastReadValue();
+        rightDelayed = rightDelay.getLastReadValue();
 
         // Reverse-granular on delay output (pre-loop mode)
         float reverseGrainMix = getClampedParam(REVERSE_GRAIN_PARAM, REVERSE_GRAIN_CV_INPUT, 0.0f, 1.0f);
@@ -622,8 +640,9 @@ void CurveAndDragModule::process(const ProcessArgs& args) {
             shimmerPitchCents = -shimmerPitchCents;
         } else if (pitchDir == PITCH_DIR_ALTERNATE) {
             // Alternate based on a slow LFO (toggles every ~0.5s)
-            // Use fmod to keep phase bounded and avoid float precision loss
-            float altPhase = std::sin(std::fmod(static_cast<float>(processCounter), effectiveSampleRate * 0.5f) / (effectiveSampleRate * 0.5f) * 2.0f * M_PI);
+            // Use double precision fmod to avoid precision loss after extended runtime
+            double altPhaseD = std::fmod(static_cast<double>(processCounter), static_cast<double>(effectiveSampleRate) * 0.5);
+            float altPhase = std::sin(static_cast<float>(altPhaseD / (static_cast<double>(effectiveSampleRate) * 0.5) * 2.0 * M_PI));
             shimmerPitchCents *= (altPhase > 0.0f) ? 1.0f : -1.0f;
         }
 
@@ -687,7 +706,11 @@ void CurveAndDragModule::process(const ProcessArgs& args) {
             rightFBPitched = processBloom(rightFBPitched, 1, bloomAmount, bloomRate, effectiveSampleRate);
         }
 
-        // 4. Feedback path processing (filters, saturation, compression, ducking, freq shift)
+        // 4. DC block feedback path to prevent DC accumulation from saturation/pitch
+        leftFBPitched = fbDcBlockerL.process(leftFBPitched);
+        rightFBPitched = fbDcBlockerR.process(rightFBPitched);
+
+        // 5. Feedback path processing (filters, saturation, compression, ducking, freq shift)
         leftFBPitched = feedbackProc.process(leftFBPitched, 0, inputLevelL);
         rightFBPitched = feedbackProc.process(rightFBPitched, 1, inputLevelR);
 
@@ -718,9 +741,9 @@ void CurveAndDragModule::process(const ProcessArgs& args) {
     if (params[CROSS_FEEDBACK_PARAM].getValue() > 0.01f) {
         float crossAmount = clamp(params[CROSS_FEEDBACK_PARAM].getValue() * 0.3f, 0.0f, 0.3f);
 
-        float filterCoeff = 0.8f;
-        leftCrossFilter += (prevRightDelayed - leftCrossFilter) * filterCoeff;
-        rightCrossFilter += (prevLeftDelayed - rightCrossFilter) * filterCoeff;
+        float crossFilterCoeff = 1.0f - std::exp(-1.0f / (effectiveSampleRate * 0.00003f)); // ~30us time constant
+        leftCrossFilter += (prevRightDelayed - leftCrossFilter) * crossFilterCoeff;
+        rightCrossFilter += (prevLeftDelayed - rightCrossFilter) * crossFilterCoeff;
 
         float leftCross = leftDelayed + leftCrossFilter * crossAmount;
         float rightCross = rightDelayed + rightCrossFilter * crossAmount;
@@ -890,10 +913,10 @@ void CurveAndDragModule::applyPitchShift(float leftIn, float rightIn,
         float lf = lPos - std::floor(lPos);
         float rf = rPos - std::floor(rPos);
 
-        bbdL = hermite(leftBBDBuffer[(li - 1) & 8191], leftBBDBuffer[li & 8191],
-                      leftBBDBuffer[(li + 1) & 8191], leftBBDBuffer[(li + 2) & 8191], lf);
-        bbdR = hermite(rightBBDBuffer[(ri - 1) & 8191], rightBBDBuffer[ri & 8191],
-                      rightBBDBuffer[(ri + 1) & 8191], rightBBDBuffer[(ri + 2) & 8191], rf);
+        bbdL = hermite(leftBBDBuffer[((li - 1) + 8192) & 8191], leftBBDBuffer[(li + 8192) & 8191],
+                      leftBBDBuffer[((li + 1) + 8192) & 8191], leftBBDBuffer[((li + 2) + 8192) & 8191], lf);
+        bbdR = hermite(rightBBDBuffer[((ri - 1) + 8192) & 8191], rightBBDBuffer[(ri + 8192) & 8191],
+                      rightBBDBuffer[((ri + 1) + 8192) & 8191], rightBBDBuffer[((ri + 2) + 8192) & 8191], rf);
 
         // NE570-style expander: expand after reading from BBD
         bbdCompanderExpand.configure(sr);
@@ -902,9 +925,10 @@ void CurveAndDragModule::applyPitchShift(float leftIn, float rightIn,
         bbdL *= leftGainComp;
         bbdR *= rightGainComp;
 
-        float clockRate = sr * leftRatio * 0.5f;
-        bbdClockPhaseL += clockRate / sr;
-        bbdClockPhaseR += clockRate / sr;
+        float clockRateL = sr * leftRatio * 0.5f;
+        float clockRateR = sr * rightRatio * 0.5f;
+        bbdClockPhaseL += clockRateL / sr;
+        bbdClockPhaseR += clockRateR / sr;
         if (bbdClockPhaseL > 1.0f) bbdClockPhaseL -= 1.0f;
         if (bbdClockPhaseR > 1.0f) bbdClockPhaseR -= 1.0f;
         float clockAmount = 0.002f * character;
@@ -913,8 +937,11 @@ void CurveAndDragModule::applyPitchShift(float leftIn, float rightIn,
 
         if (character > 0.5f) {
             float noiseLevel = (character - 0.5f) * 2.0f * 0.0001f;
-            float whiteL = ((bbdIndex * 1103515245 + 12345) & 0x7fffffff) / static_cast<float>(0x7fffffff) * 2.0f - 1.0f;
-            float whiteR = ((bbdIndex * 1103515245 + 54321) & 0x7fffffff) / static_cast<float>(0x7fffffff) * 2.0f - 1.0f;
+            // Use accumulating LCG state for non-periodic noise
+            ditherSeed = ditherSeed * 1103515245 + 12345;
+            float whiteL = (ditherSeed / 4294967296.0f) * 2.0f - 1.0f;
+            ditherSeed = ditherSeed * 1103515245 + 12345;
+            float whiteR = (ditherSeed / 4294967296.0f) * 2.0f - 1.0f;
             bbdL += whiteL * noiseLevel;
             bbdR += whiteR * noiseLevel;
         }
@@ -937,8 +964,8 @@ void CurveAndDragModule::applyPitchShift(float leftIn, float rightIn,
         int lGrain = clamp(static_cast<int>(512.0f * driftLv / std::abs(leftRatio)), 128, 2048);
         int rGrain = clamp(static_cast<int>(512.0f * driftRv / std::abs(rightRatio)), 128, 2048);
 
-        float lTriangle = 2.0f * std::abs(leftGrainPhase / lGrain - 0.5f);
-        float rTriangle = 2.0f * std::abs(rightGrainPhase / rGrain - 0.5f);
+        float lTriangle = 1.0f - 2.0f * std::abs(leftGrainPhase / lGrain - 0.5f);
+        float rTriangle = 1.0f - 2.0f * std::abs(rightGrainPhase / rGrain - 0.5f);
 
         float lPos1 = h910Index - leftGrainPhase * leftRatio;
         float lPos2 = h910Index - (leftGrainPhase + lGrain * 0.5f) * leftRatio;
@@ -967,24 +994,55 @@ void CurveAndDragModule::applyPitchShift(float leftIn, float rightIn,
         h910Index = (h910Index + 1) & 4095;
     }
 
-    // === Algorithm 2: Varispeed ===
+    // === Algorithm 2: Varispeed (dual-head crossfading) ===
     float varL = dryL, varR = dryR;
     if (needVar) {
+        // Two read heads offset by half buffer, crossfaded to avoid lapping artifacts
         leftVarReadPos += leftRatio;
         rightVarReadPos += rightRatio;
-
-        int li = static_cast<int>(std::floor(leftVarReadPos));
-        int ri = static_cast<int>(std::floor(rightVarReadPos));
-        float lf = leftVarReadPos - std::floor(leftVarReadPos);
-        float rf = rightVarReadPos - std::floor(rightVarReadPos);
-
-        varL = hermite(leftVarBuffer[(li - 1) & 16383], leftVarBuffer[li & 16383],
-                      leftVarBuffer[(li + 1) & 16383], leftVarBuffer[(li + 2) & 16383], lf) * leftGainComp;
-        varR = hermite(rightVarBuffer[(ri - 1) & 16383], rightVarBuffer[ri & 16383],
-                      rightVarBuffer[(ri + 1) & 16383], rightVarBuffer[(ri + 2) & 16383], rf) * rightGainComp;
-
         if (leftVarReadPos >= 16384.0f) leftVarReadPos -= 16384.0f;
         if (rightVarReadPos >= 16384.0f) rightVarReadPos -= 16384.0f;
+
+        auto readVar = [&](std::array<float, 16384>& buf, float readPos) -> float {
+            int li = static_cast<int>(std::floor(readPos));
+            float lf = readPos - std::floor(readPos);
+            return hermite(buf[(li - 1) & 16383], buf[li & 16383],
+                          buf[(li + 1) & 16383], buf[(li + 2) & 16383], lf);
+        };
+
+        // Head 1: primary read position
+        float lHead1 = readVar(leftVarBuffer, leftVarReadPos);
+        float rHead1 = readVar(rightVarBuffer, rightVarReadPos);
+
+        // Head 2: offset by half buffer
+        float lReadPos2 = std::fmod(leftVarReadPos + 8192.0f, 16384.0f);
+        float rReadPos2 = std::fmod(rightVarReadPos + 8192.0f, 16384.0f);
+        float lHead2 = readVar(leftVarBuffer, lReadPos2);
+        float rHead2 = readVar(rightVarBuffer, rReadPos2);
+
+        // Crossfade based on distance from write pointer to avoid reading stale data
+        auto crossfadeWeight = [&](float readPos) -> float {
+            float dist = std::fmod(static_cast<float>(varWritePos) - readPos + 16384.0f, 16384.0f);
+            float normalized = dist / 16384.0f;
+            // Fade out when read head approaches write head (within 10% of buffer)
+            if (normalized < 0.1f) return normalized * 10.0f;
+            if (normalized > 0.9f) return (1.0f - normalized) * 10.0f;
+            return 1.0f;
+        };
+
+        float lw1 = crossfadeWeight(leftVarReadPos);
+        float lw2 = crossfadeWeight(lReadPos2);
+        float rw1 = crossfadeWeight(rightVarReadPos);
+        float rw2 = crossfadeWeight(rReadPos2);
+
+        float lwSum = lw1 + lw2;
+        float rwSum = rw1 + rw2;
+        if (lwSum > 0.001f) { lw1 /= lwSum; lw2 /= lwSum; } else { lw1 = 0.5f; lw2 = 0.5f; }
+        if (rwSum > 0.001f) { rw1 /= rwSum; rw2 /= rwSum; } else { rw1 = 0.5f; rw2 = 0.5f; }
+
+        varL = (lHead1 * lw1 + lHead2 * lw2) * leftGainComp;
+        varR = (rHead1 * rw1 + rHead2 * rw2) * rightGainComp;
+
         varWritePos = (varWritePos + 1) & 16383;
     }
 
@@ -1152,14 +1210,15 @@ float CurveAndDragModule::quantizePitchToScale(float pitchCents) {
 
 // ===== HELPER METHODS =====
 void CurveAndDragModule::processDelayParameters(float sampleRate) {
-    if (!params[SYNC_L_PARAM].getValue()) {
-        float leftTimeBase = getClampedParam(TIME_L_PARAM, TIME_L_CV_INPUT, 0.0f, 1.0f) * 2000.0f;
+    // Only set time from params when per-channel CV is not connected AND sync is off
+    if (!params[SYNC_L_PARAM].getValue() && !inputs[TIME_L_CV_INPUT].isConnected()) {
+        float leftTimeBase = params[TIME_L_PARAM].getValue() * 2000.0f;
         float leftTimeMs = leftTimeBase + (timeCVGlobal * 100.0f);
         leftDelay.setDelayTime(clamp(leftTimeMs, 1.0f, 2000.0f));
     }
 
-    if (!params[SYNC_R_PARAM].getValue()) {
-        float rightTimeBase = getClampedParam(TIME_R_PARAM, TIME_R_CV_INPUT, 0.0f, 1.0f) * 2000.0f;
+    if (!params[SYNC_R_PARAM].getValue() && !inputs[TIME_R_CV_INPUT].isConnected()) {
+        float rightTimeBase = params[TIME_R_PARAM].getValue() * 2000.0f;
         float rightTimeMs = rightTimeBase + (timeCVGlobal * 100.0f);
         rightDelay.setDelayTime(clamp(rightTimeMs, 1.0f, 2000.0f));
     }
@@ -1215,16 +1274,19 @@ void CurveAndDragModule::processTapTempo(float sampleRate) {
 
 // ===== PITCH PROCESSING =====
 void CurveAndDragModule::processPitchParameters() {
-    float basePitch = getClampedParam(PITCH_PARAM, PITCH_CV_INPUT, -2.0f, 2.0f) * 1200.0f;
+    float basePitch = getClampedParam(PITCH_PARAM, PITCH_CV_INPUT, -2.0f, 2.0f) * 1200.0f + pitchCVModulation;
     float detuneL = getClampedParam(DETUNE_L_PARAM, DETUNE_L_CV_INPUT, -1.0f, 1.0f) * 50.0f;
     float detuneR = getClampedParam(DETUNE_R_PARAM, DETUNE_R_CV_INPUT, -1.0f, 1.0f) * 50.0f;
     float detuneDrift = getClampedParam(DETUNE_DRIFT_PARAM, DETUNE_DRIFT_CV_INPUT, 0.0f, 1.0f) * 25.0f;
 
-    float smoothRate = 0.005f;
+    float sr = APP->engine->getSampleRate();
+    float smoothRate = 1.0f - std::exp(-1.0f / (sr * 0.005f));
+    float detuneSmooth = 1.0f - std::exp(-1.0f / (sr * 0.002f));
+    float driftSmooth = 1.0f - std::exp(-1.0f / (sr * 0.005f));
     smoothedBasePitch += (basePitch - smoothedBasePitch) * smoothRate;
-    smoothedDetuneL += (detuneL - smoothedDetuneL) * 0.01f;
-    smoothedDetuneR += (detuneR - smoothedDetuneR) * 0.01f;
-    smoothedDrift += (detuneDrift - smoothedDrift) * 0.005f;
+    smoothedDetuneL += (detuneL - smoothedDetuneL) * detuneSmooth;
+    smoothedDetuneR += (detuneR - smoothedDetuneR) * detuneSmooth;
+    smoothedDrift += (detuneDrift - smoothedDrift) * driftSmooth;
 
     lastRawPitch = smoothedBasePitch;
     float quantizedBase = smoothedBasePitch;
@@ -1269,7 +1331,9 @@ float CurveAndDragModule::quantizePitchBuiltIn(float pitchCents, int scaleIndex)
             float semi = pitchCents / 100.0f;
             int octave = static_cast<int>(std::floor(semi / 12.0f));
             float fractional = semi - octave * 12.0f;
-            int idx = clamp(static_cast<int>(std::round(fractional)), 0, 11);
+            int idx = static_cast<int>(std::round(fractional));
+            if (idx >= 12) { idx = 0; octave++; }
+            idx = clamp(idx, 0, 11);
             return 1200.0f * std::log2(justRatios[idx]) + octave * 1200.0f;
         }
         case 4: {
@@ -1278,7 +1342,9 @@ float CurveAndDragModule::quantizePitchBuiltIn(float pitchCents, int scaleIndex)
             float semi = pitchCents / 100.0f;
             int octave = static_cast<int>(std::floor(semi / 12.0f));
             float fractional = semi - octave * 12.0f;
-            int idx = clamp(static_cast<int>(std::round(fractional)), 0, 11);
+            int idx = static_cast<int>(std::round(fractional));
+            if (idx >= 12) { idx = 0; octave++; }
+            idx = clamp(idx, 0, 11);
             return 1200.0f * std::log2(pythRatios[idx]) + octave * 1200.0f;
         }
         case 5: {
@@ -1287,7 +1353,9 @@ float CurveAndDragModule::quantizePitchBuiltIn(float pitchCents, int scaleIndex)
             float semi = pitchCents / 100.0f;
             int octave = static_cast<int>(std::floor(semi / 12.0f));
             float fractional = semi - octave * 12.0f;
-            int idx = clamp(static_cast<int>(std::round(fractional)), 0, 11);
+            int idx = static_cast<int>(std::round(fractional));
+            if (idx >= 12) { idx = 0; octave++; }
+            idx = clamp(idx, 0, 11);
             return meantoneSteps[idx] + octave * 1200.0f;
         }
         case 6: {
@@ -1296,7 +1364,9 @@ float CurveAndDragModule::quantizePitchBuiltIn(float pitchCents, int scaleIndex)
             float semi = pitchCents / 100.0f;
             int octave = static_cast<int>(std::floor(semi / 12.0f));
             float fractional = semi - octave * 12.0f;
-            int idx = clamp(static_cast<int>(std::round(fractional)), 0, 11);
+            int idx = static_cast<int>(std::round(fractional));
+            if (idx >= 12) { idx = 0; octave++; }
+            idx = clamp(idx, 0, 11);
             return wellTempSteps[idx] + octave * 1200.0f;
         }
         case 7: return std::round(pitchCents / (1200.0f / 19.0f)) * (1200.0f / 19.0f);
@@ -1381,6 +1451,11 @@ json_t* CurveAndDragModule::dataToJson() {
     json_object_set_new(rootJ, "tuningInfo", json_string(tuningInfo.c_str()));
     json_object_set_new(rootJ, "detectedBPM", json_real(detectedBPM));
     json_object_set_new(rootJ, "pitchPlacement", json_integer(static_cast<int>(pitchPlacement)));
+
+    // Save Scala file path for reload
+    if (scalaReader.isLoaded() && !scalaReader.getScaleFilePath().empty()) {
+        json_object_set_new(rootJ, "scalaFilePath", json_string(scalaReader.getScaleFilePath().c_str()));
+    }
     // Per-head DSP parameters
     json_t* headPitchJ = json_array();
     json_t* headCutoffJ = json_array();
@@ -1415,6 +1490,15 @@ void CurveAndDragModule::dataFromJson(json_t* rootJ) {
 
     json_t* placementJ = json_object_get(rootJ, "pitchPlacement");
     if (placementJ) pitchPlacement = static_cast<PitchPlacement>(json_integer_value(placementJ));
+
+    // Restore Scala file
+    json_t* scalaPathJ = json_object_get(rootJ, "scalaFilePath");
+    if (scalaPathJ) {
+        std::string scalaPath = json_string_value(scalaPathJ);
+        if (!scalaPath.empty()) {
+            scalaReader.loadScalaFile(scalaPath);
+        }
+    }
 
     // Per-head DSP parameters
     json_t* headPitchJ = json_object_get(rootJ, "headPitchSemitones");

@@ -275,7 +275,7 @@ struct PhaseLockingPitchShifter {
 
             // Read from buffer at grain's position
             float readPos = g.startPos - g.phase;
-            int readIdx = static_cast<int>(readPos);
+            int readIdx = static_cast<int>(std::floor(readPos));
             float frac = readPos - std::floor(readPos);
 
             // Cubic Hermite interpolation (higher quality than linear)

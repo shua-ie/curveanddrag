@@ -57,9 +57,10 @@ struct PerHeadDSP {
 
     void reset() {
         filter.reset();
-        readPhase = 0.0f;
         pitchBuffer.fill(0.0f);
         pitchWritePos = 0;
+        // Offset readPhase behind writePos to prevent reading ahead
+        readPhase = static_cast<float>(PITCH_BUF_SIZE / 2);
         aaLpState = 0.0f;
         smoothedRatio = 1.0f;
     }
@@ -299,21 +300,19 @@ public:
      * Enable/disable tape mode
      */
     void setTapeMode(bool enabled) {
+        if (tapeModeEnabled == enabled) return; // Only act on state change
         tapeModeEnabled = enabled;
-        
-        // CRITICAL FIX: When enabling tape mode, ensure heads are properly initialized
+
         if (enabled) {
-            // Initialize tape heads with safe default delay times
+            // Initialize tape heads with safe default delay times (only on transition)
             for (int ch = 0; ch < 2; ch++) {
                 recordHeads[ch].configure(sampleRate);
                 for (int head = 0; head < 4; head++) {
                     playHeads[ch][head].configure(sampleRate);
-                    // CRITICAL FIX: Set minimum delay time to prevent empty buffer reads
-                    float headDelayTime = std::max(50.0f + head * 50.0f, 10.0f); // Minimum 10ms delay
+                    float headDelayTime = std::max(50.0f + head * 50.0f, 10.0f);
                     playHeads[ch][head].setDelayTime(headDelayTime);
                 }
             }
-            // Initialize filters to prevent startup clicks
             initializeFilters();
         }
     }
@@ -803,23 +802,21 @@ public:
         }
         
         // Calculate wow modulation
-        float wowMod = 0.0f;
         switch (wowWaveform) {
             case SINE:
-                wowMod = std::sin(2.0f * M_PI * wowPhase);
+                wowSmoothedMod = std::sin(2.0f * M_PI * wowPhase);
                 break;
             case TRIANGLE:
-                // Triangle wave
-                wowMod = 2.0f * std::abs(2.0f * (wowPhase - std::floor(wowPhase + 0.5f))) - 1.0f;
+                wowSmoothedMod = 2.0f * std::abs(2.0f * (wowPhase - std::floor(wowPhase + 0.5f))) - 1.0f;
                 break;
             case RANDOM:
-                // Random walk with smoothing
                 if (wowPhase < 0.01f || wowPhase > 0.99f) {
                     wowRandomTarget = randomUniform(-1.0f, 1.0f);
                 }
-                wowMod = wowMod * 0.99f + wowRandomTarget * 0.01f;
+                wowSmoothedMod = wowSmoothedMod * 0.99f + wowRandomTarget * 0.01f;
                 break;
         }
+        float wowMod = wowSmoothedMod;
         
         // Calculate flutter modulation
         float flutterMod = 0.0f;
@@ -1056,6 +1053,7 @@ private:
     WowFlutterWaveform wowWaveform;
     WowFlutterWaveform flutterWaveform;
     float wowRandomTarget = 0.0f;
+    float wowSmoothedMod = 0.0f; // Persists across samples for random smoothing
     float flutterRandomValue = 0.0f;
     
     // Tape Saturation
